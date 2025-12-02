@@ -112,14 +112,31 @@ def separating_distance(polyA, polyB):
     if len(axes) == 0:
         return np.inf
 
-    min_sep = np.inf
+    # Track maximum overlap depth (negative) and minimum separation (positive)
+    max_overlap = -np.inf
+    min_separation = np.inf
+    
     for a in axes:
         a = a / (np.linalg.norm(a)+1e-12)
         # Project using convex hull vertices for consistency
         minA, maxA = project_polygon(a, hullA)
         minB, maxB = project_polygon(a, hullB)
-        # actual signed separation: if intervals overlap, sep <= 0
-        sep = min(minA - maxB, minB - maxA)
-        min_sep = min(min_sep, sep)
-    return min_sep
+        
+        # Check if intervals overlap on this axis
+        if maxA >= minB and maxB >= minA:
+            # Overlapping: compute overlap depth
+            overlap_depth = min(maxA - minB, maxB - minA)
+            max_overlap = max(max_overlap, overlap_depth)
+        else:
+            # Separated on this axis: compute separation distance
+            # When separated, one of these will be positive (the actual separation)
+            separation = max(minB - maxA, minA - maxB)
+            min_separation = min(min_separation, separation)
+    
+    # If we found any separation axis, polygons are separated
+    if min_separation < np.inf:
+        return min_separation  # Positive: separation distance
+    else:
+        # All axes show overlap, polygons overlap
+        return -max_overlap  # Negative: overlap depth
 
