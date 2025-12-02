@@ -22,11 +22,11 @@ movables = [
     },
     {
         'verts': np.array([[0.25,0.25],[-0.25,0.25],[-0.25,-0.25],[0.25,-0.25]]),
-        'target': np.array([1.,1.5])
+        'target': np.array([0.25,2.25])
     },
     {
         'verts': np.array([[0.25,0.5],[-0.25,0.5],[-0.25,-0.5],[0.25,-0.5]]),
-        'target': np.array([2.5,2.5])
+        'target': np.array([2.25,2.5])
     },
     {
         'verts': np.array([[0.5,0.25],[-0.5,0.25],[-0.5,-0.25],[0.5,-0.25]]),
@@ -38,26 +38,26 @@ movables = [
 fixed_obstacles = [
     {
         'verts': np.array([[8.0,0.25],[-8.0,0.25],[8.0,-0.25],[-8.0,-0.25]]),
-        'center': np.array([0.0,0.0]) 
+        'center': np.array([0.0,0.0]),
     },
     {
         'verts': np.array([[0.5,1.5],[-0.5,1.5],[0.5,-1.5],[-0.5,-1.5]]),
-        'center': np.array([1.0,1.0]) 
+        'center': np.array([0.0,2.5]),
     },
     {
         'verts': np.array([[0.5,2.5],[-0.5,2.5],[0.5,-2.5],[-0.5,-2.5]]),
-        'center': np.array([2.5,2.5]) 
+        'center': np.array([2.5,2.5]),
     },
     {
         'verts': np.array([[8.0,0.25],[-8.0,0.25],[8.0,-0.25],[-8.0,-0.25]]),
-        'center': np.array([0.0,5.0]) 
+        'center': np.array([0.0,5.0]),
     },
 ]
 
 # Optimization parameters
 placement_bounds = ((-10.0, 10.0), (-10.0, 10.0))
-num_restarts = 1
-maxiter = 1000
+num_restarts = 10
+maxiter = 8000
 
 
 def plot_result(xvec, xvec_initial, movables, fixed_obstacles, placement_bounds):
@@ -167,8 +167,14 @@ def plot_result(xvec, xvec_initial, movables, fixed_obstacles, placement_bounds)
 if __name__ == '__main__':
     np.random.seed(0)
     
-    # Run optimization
-    res, x_initial = optimize(movables, fixed_obstacles, num_restarts, maxiter, placement_bounds)
+    # Run optimization with adaptive margins
+    # margin_ratio: 0.1 = 10% of average polygon size as margin
+    # min_separation: base separation distance (added to adaptive margin)
+    # target_weight: weight for distance to target (default 100.0)
+    # normal_weight: weight for alignment with normal from fixed obstacles (default 10.0)
+    res, x_initial = optimize(movables, fixed_obstacles, num_restarts, maxiter, 
+                              placement_bounds, min_separation=0.0, margin_ratio=0.1,
+                              target_weight=100.0, normal_weight=100.0)
     
     print("Result:", res.fun)
     

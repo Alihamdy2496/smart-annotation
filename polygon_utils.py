@@ -25,6 +25,36 @@ def translate_polygon(verts, pos):
     return verts + pos
 
 
+def polygon_characteristic_size(verts):
+    """
+    Calculate characteristic size of a polygon (useful for adaptive margins).
+    Uses the average of width and height of bounding box.
+    
+    Args:
+        verts: Array of polygon vertices
+    
+    Returns:
+        Characteristic size (average of bounding box dimensions)
+    """
+    if len(verts) == 0:
+        return 0.0
+    
+    # Get convex hull for consistent size calculation
+    hull_verts = get_convex_hull_vertices(verts, closed=False)
+    if len(hull_verts) == 0:
+        return 0.0
+    
+    # Calculate bounding box
+    min_x, max_x = np.min(hull_verts[:, 0]), np.max(hull_verts[:, 0])
+    min_y, max_y = np.min(hull_verts[:, 1]), np.max(hull_verts[:, 1])
+    
+    width = max_x - min_x
+    height = max_y - min_y
+    
+    # Return average dimension as characteristic size
+    return (width + height) / 2.0
+
+
 def get_convex_hull_vertices(verts, closed=False):
     """
     Compute convex hull of vertices and return ordered vertices.
