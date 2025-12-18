@@ -816,7 +816,6 @@ def optimize(
                     jac="2-point",
                     hess=BFGS(),
                     bounds=bounds[batch_start * 2 : batch_end * 2],
-                    constraints=constraints,
                     options={"maxiter": 5000, "verbose": 3},
                 )
 
