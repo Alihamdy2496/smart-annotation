@@ -21,8 +21,24 @@ def sort_vertices_ccw(verts):
     return verts[np.argsort(angles)]
 
 
-def translate_polygon(verts, pos):
-    """Translate polygon vertices by position vector."""
+def translate_polygon(verts, pos, angle=0.0):
+    """
+    Translate and rotate polygon vertices.
+
+    Args:
+        verts: Array of vertices (N, 2)
+        pos: Position vector (2,)
+        angle: Rotation angle in radians (counter-clockwise)
+
+    Returns:
+        Transformed vertices
+    """
+    if angle != 0.0:
+        c, s = np.cos(angle), np.sin(angle)
+        R = np.array([[c, -s], [s, c]])
+        # Rotate vertices
+        verts_rotated = verts @ R.T
+        return verts_rotated + pos
     return verts + pos
 
 

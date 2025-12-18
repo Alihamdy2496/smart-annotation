@@ -4,6 +4,7 @@ Optimizer and cost functions for object placement optimization.
 
 import numpy as np
 from scipy.optimize import minimize
+from scipy.spatial import cKDTree
 from polygon_utils import (
     unpack_xy,
     translate_polygon,
@@ -11,13 +12,167 @@ from polygon_utils import (
     separating_distance,
     polygon_characteristic_size,
 )
+from scipy.optimize import BFGS
 
 
-def objective(xvec, movables, fixed_obstacles, target_weight=100.0, normal_weight=10.0):
+def overlap_penalty(
+    xvec,
+    movables,
+    all_fixed_obstacles,
+    overlap_weight=1000.0,
+    min_separation=0.0,
+    margin_ratio=0.1,
+    movable_sizes=None,
+    fixed_sizes=None,
+):
     """
-    Calculate objective with two components:
+    Calculate overlap penalty with KD-tree spatial filtering.
+
+    Args:
+        xvec: Flattened array of positions for all movable objects
+        movables: List of movable object dictionaries
+        all_fixed_obstacles: List of all fixed obstacle dictionaries
+        overlap_weight: Weight for overlap penalty term
+        min_separation: Base minimum separation distance
+        margin_ratio: Ratio of average polygon size to use as margin
+        movable_sizes: Pre-computed sizes of movables
+        fixed_sizes: Pre-computed sizes of fixed obstacles
+
+    Returns:
+        Overlap penalty value
+    """
+    pts = unpack_xy(xvec)
+    val = 0.0
+
+    # Calculate search radius based on maximum object sizes
+    n_movables = len(movables)
+    if n_movables > 0 and movable_sizes is not None and fixed_sizes is not None:
+        max_movable_size = np.max(movable_sizes)
+        max_fixed_size = (
+            np.max(
+                [
+                    fixed_sizes[idx]
+                    for idx, obs in enumerate(all_fixed_obstacles)
+                    if obs.get("center") is not None
+                ]
+            )
+            if any(obs.get("center") is not None for obs in all_fixed_obstacles)
+            else 1.0
+        )
+        search_radius = (max_movable_size) * 4.0
+
+        # Build KD-tree for current movable positions
+        movable_tree = cKDTree(pts)
+
+        # Penalize overlaps between movables (spatially filtered)
+        for i in range(n_movables):
+            # Query KD-tree to find nearby movables within search radius
+            candidate_indices = movable_tree.query_ball_point(pts[i], search_radius)
+
+            for j in candidate_indices:
+                if j <= i:  # Skip self and already processed pairs
+                    continue
+
+                # Calculate adaptive margin based on polygon sizes
+                size_i = movable_sizes[i]
+                size_j = movable_sizes[j]
+                avg_size = (size_i + size_j) / 2.0
+                adaptive_margin = min_separation + (
+                    margin_ratio * avg_size if margin_ratio is not None else 0.0
+                )
+
+                A_translated = translate_polygon(
+                    movables[i]["verts"],
+                    pts[i],
+                    movables[i]["RotationAngle"],
+                )
+                B_translated = translate_polygon(
+                    movables[j]["verts"],
+                    pts[j],
+                    movables[j]["RotationAngle"],
+                )
+                sep = separating_distance(A_translated, B_translated)
+
+                # Penalize if separation < margin
+                # The penalty increases quadratically as overlap increases
+                if sep < adaptive_margin:
+                    violation = adaptive_margin - sep
+                    val += overlap_weight * violation**2
+
+        # Build KD-tree for fixed obstacle centers
+        fixed_centers = np.array(
+            [
+                obs["center"]
+                for obs in all_fixed_obstacles
+                if obs.get("center") is not None
+            ]
+        )
+        valid_fixed_indices = [
+            idx
+            for idx, obs in enumerate(all_fixed_obstacles)
+            if obs.get("center") is not None
+        ]
+
+        if len(fixed_centers) > 0:
+            fixed_tree = cKDTree(fixed_centers)
+
+            # Penalize overlaps between movables and fixed obstacles (spatially filtered)
+            for i in range(n_movables):
+                # Query KD-tree to find nearby fixed obstacles within search radius
+                candidate_tree_indices = fixed_tree.query_ball_point(
+                    pts[i], search_radius
+                )
+
+                for tree_idx in candidate_tree_indices:
+                    obs_idx = valid_fixed_indices[tree_idx]
+                    obs = all_fixed_obstacles[obs_idx]
+
+                    # Calculate adaptive margin based on polygon sizes
+                    size_i = movable_sizes[i]
+                    size_obs = fixed_sizes[obs_idx]
+                    avg_size = (size_i + size_obs) / 2.0
+                    adaptive_margin = min_separation + (
+                        margin_ratio * avg_size if margin_ratio is not None else 0.0
+                    )
+
+                    A_translated = translate_polygon(
+                        movables[i]["verts"],
+                        pts[i],
+                        movables[i]["RotationAngle"],
+                    )
+                    B_translated = translate_polygon(
+                        obs["verts"],
+                        obs["center"],
+                        obs["RotationAngle"],
+                    )
+                    sep = separating_distance(A_translated, B_translated)
+
+                    # Penalize if separation < margin
+                    if sep < adaptive_margin:
+                        violation = adaptive_margin - sep
+                        val += overlap_weight * violation**2
+
+    return val
+
+
+def objective(
+    xvec,
+    movables,
+    fixed_obstacles,
+    all_fixed_obstacles,
+    target_weight=100.0,
+    normal_weight=100.0,
+    overlap_weight=1000.0,
+    min_separation=0.0,
+    margin_ratio=0.1,
+    movable_sizes=None,
+    fixed_sizes=None,
+):
+    """
+    Calculate objective with three components:
     1. Distance from movables to their targets
     2. Distance from movables to normal lines from fixed obstacles
+    3. Penalty for overlaps between movables and between movables and fixed obstacles
 
     The normal is computed from the line connecting fixed_obstacle center to movable target.
 
@@ -27,6 +182,9 @@ def objective(xvec, movables, fixed_obstacles, target_weight=100.0, normal_weigh
         fixed_obstacles: List of fixed obstacle dictionaries with 'center' key
         target_weight: Weight for target distance term
         normal_weight: Weight for normal alignment term
+        overlap_weight: Weight for overlap penalty term
+        min_separation: Base minimum separation distance
+        margin_ratio: Ratio of average polygon size to use as margin
 
     Returns:
         Total weighted objective value
@@ -34,43 +192,41 @@ def objective(xvec, movables, fixed_obstacles, target_weight=100.0, normal_weigh
     pts = unpack_xy(xvec)
     val = 0.0
 
-    # Component 1: Distance from movables to targets
     for i, p in enumerate(pts):
         t = movables[i]["target"]
+        center = fixed_obstacles[i]["center"]
+        if center is None:
+            continue
+
+        # Component 1: Distance from movables to targets
         val += target_weight * np.sum((p - t) ** 2)
 
-    # Component 2: Distance from movables to normal lines from fixed obstacles
-    for i, p in enumerate(pts):
-        t = movables[i]["target"]
+        # Component 2: Distance from movables to normal lines from fixed obstacles
+        # Vector from fixed obstacle center to movable target
+        vec_to_target = t - center
+        vec_len = np.linalg.norm(vec_to_target)
 
-        for obs in fixed_obstacles:
-            center = obs["center"]
+        # Skip if target is at the center (degenerate case)
+        if vec_len < 1e-10:
+            continue
 
-            # Vector from fixed obstacle center to movable target
-            vec_to_target = t - center
-            vec_len = np.linalg.norm(vec_to_target)
+        # Normalize the vector
+        vec_to_target_norm = vec_to_target / vec_len
 
-            # Skip if target is at the center (degenerate case)
-            if vec_len < 1e-10:
-                continue
+        # Compute normal vector (perpendicular to vec_to_target)
+        # In 2D, normal to [dx, dy] is [-dy, dx] or [dy, -dx]
+        normal = np.array([-vec_to_target_norm[1], vec_to_target_norm[0]])
 
-            # Normalize the vector
-            vec_to_target_norm = vec_to_target / vec_len
+        # Vector from fixed obstacle center to movable position
+        vec_to_movable = p - center
 
-            # Compute normal vector (perpendicular to vec_to_target)
-            # In 2D, normal to [dx, dy] is [-dy, dx] or [dy, -dx]
-            normal = np.array([-vec_to_target_norm[1], vec_to_target_norm[0]])
+        # Project vec_to_movable onto the normal direction
+        # Distance from movable to the normal line through fixed center
+        # This is the component of vec_to_movable along the normal
+        distance_to_normal = np.abs(np.dot(vec_to_movable, normal))
 
-            # Vector from fixed obstacle center to movable position
-            vec_to_movable = p - center
-
-            # Project vec_to_movable onto the normal direction
-            # Distance from movable to the normal line through fixed center
-            # This is the component of vec_to_movable along the normal
-            distance_to_normal = np.abs(np.dot(vec_to_movable, normal))
-
-            # Add squared distance to objective (minimize distance to normal line)
-            val += normal_weight * distance_to_normal**2
+        # Add squared distance to objective (minimize distance to normal line)
+        val += normal_weight * distance_to_normal**2
 
     return val
 
@@ -80,6 +236,7 @@ def create_non_overlap_constraints(
 ):
     """
     Create constraint functions for non-overlap conditions with adaptive margins.
+    Uses KD-tree spatial filtering to only create constraints for nearby obstacles.
 
     The margin is calculated as: min_separation + margin_ratio * average_polygon_size
     This ensures larger polygons get proportionally larger margins.
@@ -105,10 +262,44 @@ def create_non_overlap_constraints(
     movable_sizes = [polygon_characteristic_size(m["verts"]) for m in movables]
     fixed_sizes = [polygon_characteristic_size(obs["verts"]) for obs in fixed_obstacles]
 
-    # Constraint: movable-movable non-overlap
+    # Calculate search radius based on maximum object sizes
+    max_movable_size = np.max(movable_sizes) if len(movable_sizes) > 0 else 1.0
+    max_fixed_size = (
+        np.max(
+            [
+                fixed_sizes[idx]
+                for idx, obs in enumerate(fixed_obstacles)
+                if obs.get("center") is not None
+            ]
+        )
+        if any(obs.get("center") is not None for obs in fixed_obstacles)
+        else 1.0
+    )
+    search_radius = (max_movable_size) * 4.0  # 4x safety factor
+
+    print(f"KD-tree spatial filtering: search_radius = {search_radius:.2f}")
+
+    # Build KD-tree for movable targets
     n_movables = len(movables)
+    movable_targets = np.array([m["target"] for m in movables])
+    movable_tree = cKDTree(movable_targets)
+
+    # Constraint: movable-movable non-overlap (spatially filtered)
+    total_movable_pairs = 0
     for i in range(n_movables):
-        for j in range(i + 1, n_movables):
+        # Query KD-tree to find nearby movables within search radius
+        # query_ball_point returns indices of points within radius
+        candidate_indices = movable_tree.query_ball_point(
+            movables[i]["target"], search_radius
+        )
+
+        # Only create constraints with movables that have index > i to avoid duplicates
+        for j in candidate_indices:
+            if j <= i:  # Skip self and already processed pairs
+                continue
+
+            total_movable_pairs += 1
+
             # Calculate adaptive margin based on polygon sizes
             size_i = movable_sizes[i]
             size_j = movable_sizes[j]
@@ -122,10 +313,14 @@ def create_non_overlap_constraints(
                 def constraint(xvec):
                     pts = unpack_xy(xvec)
                     A_translated = translate_polygon(
-                        movables[i_val]["verts"], pts[i_val]
+                        movables[i_val]["verts"],
+                        pts[i_val],
+                        movables[i_val]["RotationAngle"],
                     )
                     B_translated = translate_polygon(
-                        movables[j_val]["verts"], pts[j_val]
+                        movables[j_val]["verts"],
+                        pts[j_val],
+                        movables[j_val]["RotationAngle"],
                     )
                     sep = separating_distance(A_translated, B_translated)
                     # Constraint satisfied when sep >= margin
@@ -138,36 +333,90 @@ def create_non_overlap_constraints(
                 {"type": "ineq", "fun": make_constraint_movable(i, j, adaptive_margin)}
             )
 
-    # Constraint: movable-fixed non-overlap
-    for i in range(n_movables):
-        for obs_idx, obs in enumerate(fixed_obstacles):
-            # Calculate adaptive margin based on polygon sizes
-            size_i = movable_sizes[i]
-            size_obs = fixed_sizes[obs_idx]
-            avg_size = (size_i + size_obs) / 2.0
-            adaptive_margin = min_separation + (
-                margin_ratio * avg_size if margin_ratio is not None else 0.0
+    max_movable_pairs = n_movables * (n_movables - 1) // 2
+    print(
+        f"KD-tree filtering reduced movable-movable pairs from {max_movable_pairs} to {total_movable_pairs}"
+    )
+
+    # Build KD-tree for spatial filtering of fixed obstacles
+    # Only create constraints for movables near fixed obstacles
+    fixed_centers = np.array(
+        [obs["center"] for obs in fixed_obstacles if obs.get("center") is not None]
+    )
+    valid_fixed_indices = [
+        idx for idx, obs in enumerate(fixed_obstacles) if obs.get("center") is not None
+    ]
+
+    if len(fixed_centers) > 0:
+        tree = cKDTree(fixed_centers)
+
+        # Calculate search radius based on maximum movable size
+        max_movable_size = np.max(movable_sizes) if len(movable_sizes) > 0 else 1.0
+        max_fixed_size = (
+            np.max([fixed_sizes[idx] for idx in valid_fixed_indices])
+            if len(valid_fixed_indices) > 0
+            else 1.0
+        )
+        search_radius = (max_movable_size) * 2  # 2x safety factor
+
+        print(f"KD-tree spatial filtering: search_radius = {search_radius:.2f}")
+
+        # Constraint: movable-fixed non-overlap (spatially filtered)
+        total_candidates = 0
+        for i in range(n_movables):
+            # Query KD-tree to find fixed obstacles within search radius of movable's target
+            candidate_tree_indices = tree.query_ball_point(
+                movables[i]["target"], search_radius
             )
+            total_candidates += len(candidate_tree_indices)
 
-            # Capture loop variables using default arguments
-            def make_constraint_fixed(i_val=i, obs_val=obs, margin=adaptive_margin):
-                def constraint(xvec):
-                    pts = unpack_xy(xvec)
-                    A_translated = translate_polygon(
-                        movables[i_val]["verts"], pts[i_val]
-                    )
-                    B_translated = translate_polygon(
-                        obs_val["verts"], obs_val["center"]
-                    )
-                    sep = separating_distance(A_translated, B_translated)
-                    # Constraint satisfied when sep >= margin
-                    return sep - margin
+            for tree_idx in candidate_tree_indices:
+                # Map tree index back to original fixed_obstacles index
+                obs_idx = valid_fixed_indices[tree_idx]
+                obs = fixed_obstacles[obs_idx]
 
-                return constraint
+                # Calculate adaptive margin based on polygon sizes
+                size_i = movable_sizes[i]
+                size_obs = fixed_sizes[obs_idx]
+                avg_size = (size_i + size_obs) / 2.0
+                adaptive_margin = min_separation + (
+                    margin_ratio * avg_size if margin_ratio is not None else 0.0
+                )
 
-            constraints.append(
-                {"type": "ineq", "fun": make_constraint_fixed(i, obs, adaptive_margin)}
-            )
+                # Capture loop variables using default arguments
+                def make_constraint_fixed(i_val=i, obs_val=obs, margin=adaptive_margin):
+                    def constraint(xvec):
+                        pts = unpack_xy(xvec)
+                        A_translated = translate_polygon(
+                            movables[i_val]["verts"],
+                            pts[i_val],
+                            movables[i_val]["RotationAngle"],
+                        )
+                        B_translated = translate_polygon(
+                            obs_val["verts"],
+                            obs_val["center"],
+                            obs_val["RotationAngle"],
+                        )
+                        sep = separating_distance(A_translated, B_translated)
+                        # Constraint satisfied when sep >= margin
+                        return sep - margin
+
+                    return constraint
+
+                constraints.append(
+                    {
+                        "type": "ineq",
+                        "fun": make_constraint_fixed(i, obs, adaptive_margin),
+                    }
+                )
+
+        print(
+            f"KD-tree filtering reduced movable-fixed pairs from {n_movables * len(fixed_obstacles)} to {total_candidates}"
+        )
+    else:
+        print(
+            "No valid fixed obstacles with centers, skipping movable-fixed constraints"
+        )
 
     return constraints
 
@@ -238,7 +487,7 @@ def create_positive_side_constraints(movables, fixed_obstacles):
                     # Dot product: positive means movable is on positive side of normal
                     # Constraint satisfied when dot product >= 0
                     # print("dot product", np.dot(vec_to_movable_norm, normal_vec))
-                    return np.dot(vec_to_movable_norm, normal_vec) 
+                    return np.dot(vec_to_movable_norm, normal_vec)
 
                 return constraint
 
@@ -253,7 +502,6 @@ def create_positive_side_constraints(movables, fixed_obstacles):
 
 
 def generate_initial_point(movables, fixed_obstacles, init_attempt, prev_solution=None):
-
     def project_to_positive_side(p, center, normal, min_dist=0.05):
         """
         Ensure p is on the positive half-plane defined by 'normal' through 'center'.
@@ -273,8 +521,16 @@ def generate_initial_point(movables, fixed_obstacles, init_attempt, prev_solutio
             # Movable vs movable
             for i in range(len(movables)):
                 for j in range(i + 1, len(movables)):
-                    A = translate_polygon(movables[i]["verts"], pts[i])
-                    B = translate_polygon(movables[j]["verts"], pts[j])
+                    A = translate_polygon(
+                        movables[i]["verts"],
+                        pts[i],
+                        movables[i]["RotationAngle"],
+                    )
+                    B = translate_polygon(
+                        movables[j]["verts"],
+                        pts[j],
+                        movables[j]["RotationAngle"],
+                    )
                     sep = separating_distance(A, B)
                     if sep < 0:  # overlapping
                         direction = pts[i] - pts[j]
@@ -287,10 +543,16 @@ def generate_initial_point(movables, fixed_obstacles, init_attempt, prev_solutio
             # Movable vs fixed
             for i in range(len(movables)):
                 for obs in fixed_obstacles:
-                    A = translate_polygon(movables[i]["verts"], pts[i])
-                    B = translate_polygon(obs["verts"], obs["center"])
+                    A = translate_polygon(
+                        movables[i]["verts"],
+                        pts[i],
+                        movables[i]["RotationAngle"],
+                    )
+                    B = translate_polygon(
+                        obs["verts"], obs["center"], obs["RotationAngle"]
+                    )
                     sep = separating_distance(A, B)
-                    ################################### here make usre that this doesn't violate the positive side 
+                    ################################### here make usre that this doesn't violate the positive side
                     if sep < 0:
                         direction = pts[i] - obs["center"]
                         if np.linalg.norm(direction) < 1e-6:
@@ -340,7 +602,6 @@ def generate_initial_point(movables, fixed_obstacles, init_attempt, prev_solutio
     return pts.reshape(-1)
 
 
-
 def optimize(
     movables,
     fixed_obstacles,
@@ -370,10 +631,6 @@ def optimize(
     best = None
     best_initial = None
 
-    # Set default bounds if not provided
-    if placement_bounds is None:
-        placement_bounds = ((-10.0, 10.0), (-10.0, 10.0))
-
     # Create bounds for optimizer: list of (min, max) tuples for each variable
     n = len(movables)
     bounds = []
@@ -386,16 +643,17 @@ def optimize(
         movables, fixed_obstacles, min_separation, margin_ratio
     )
 
-    # Create positive side constraints (movables must be in front of fixed obstacles)
-    positive_side_constraints = create_positive_side_constraints(
-        movables, fixed_obstacles
-    )
+    # # Create positive side constraints (movables must be in front of fixed obstacles)
+    # positive_side_constraints = create_positive_side_constraints(
+    #     movables, fixed_obstacles
+    # )
 
     # Combine all constraints
-    constraints = positive_side_constraints + overlap_constraints
+    # constraints = positive_side_constraints + overlap_constraints
+    constraints = overlap_constraints
 
     print(f"Created {len(overlap_constraints)} non-overlap constraints")
-    print(f"Created {len(positive_side_constraints)} positive-side constraints")
+    # print(f"Created {len(positive_side_constraints)} positive-side constraints")
     print(f"Total constraints: {len(constraints)}")
 
     # Helper function to check constraint feasibility
@@ -422,89 +680,219 @@ def optimize(
         f"Target positions feasibility: {'FEASIBLE' if target_feasible else 'INFEASIBLE'} (min constraint: {target_min_const:.6f})"
     )
 
-    # Create objective function
-    def cost_func(x):
-        return objective(x, movables, fixed_obstacles, target_weight, normal_weight)
 
-    prev_solution = None  # Track feasible partial solutions across restarts
+    # prev_solution = None  # Track feasible partial solutions across restarts
+
+    batch_size = len(movables)
+    num_batches = (len(movables) + batch_size - 1) // batch_size  # Ceiling division
+    x0 = np.array([m["target"] for m in movables]).reshape(-1)
+    result = x0.copy()
+
+    print(
+        f"Processing {len(movables)} movables in {num_batches} batches of size {batch_size}"
+    )
+
+    # Create objective function for Stage 1 (with overlap penalty)
+    def cost_func_stage1(x, batch_idx, batch_size):
+        movables_subset = movables[
+            batch_idx * batch_size : (batch_idx + 1) * batch_size
+        ]
+
+        fixed_obstacles_subset = []
+        for movable in movables_subset:
+            hostElementID = movable["HostElementId"]
+            for obs in fixed_obstacles:
+                if obs["ElementId"] == hostElementID:
+                    fixed_obstacles_subset.append(obs)
+                    break
+                else:
+                    fixed_obstacles_subset.append({"center": None})
+
+        # Pre-compute polygon sizes for adaptive margins
+        movable_sizes = [
+            polygon_characteristic_size(m["verts"]) for m in movables_subset
+        ]
+        fixed_sizes = [
+            polygon_characteristic_size(obs["verts"])
+            if obs.get("center") is not None and "verts" in obs
+            else 0.0
+            for obs in fixed_obstacles
+        ]
+
+        # Calculate objective (target + normal alignment)
+        obj_val = objective(
+            x,
+            movables_subset,
+            fixed_obstacles_subset,
+            fixed_obstacles,
+            target_weight,
+            normal_weight,
+            overlap_weight=1000.0,
+            min_separation=min_separation,
+            margin_ratio=margin_ratio,
+            movable_sizes=movable_sizes,
+            fixed_sizes=fixed_sizes,
+        )
+
+        # Calculate overlap penalty (ACTIVE in Stage 1)
+        overlap_val = overlap_penalty(
+            x,
+            movables_subset,
+            fixed_obstacles,
+            overlap_weight=1000.0,
+            min_separation=min_separation,
+            margin_ratio=margin_ratio,
+            movable_sizes=movable_sizes,
+            fixed_sizes=fixed_sizes,
+        )
+
+        return obj_val + overlap_val
+        
+    # Create objective function for Stage 2 (without overlap penalty)
+    def cost_func_stage2(x, batch_idx, batch_size):
+        movables_subset = movables[
+            batch_idx * batch_size : (batch_idx + 1) * batch_size
+        ]
+
+        fixed_obstacles_subset = []
+        for movable in movables_subset:
+            hostElementID = movable["HostElementId"]
+            for obs in fixed_obstacles:
+                if obs["ElementId"] == hostElementID:
+                    fixed_obstacles_subset.append(obs)
+                    break
+                else:
+                    fixed_obstacles_subset.append({"center": None})
+
+        # Pre-compute polygon sizes
+        movable_sizes = [
+            polygon_characteristic_size(m["verts"]) for m in movables_subset
+        ]
+        fixed_sizes = [
+            polygon_characteristic_size(obs["verts"])
+            if obs.get("center") is not None and "verts" in obs
+            else 0.0
+            for obs in fixed_obstacles
+        ]
+
+        # Only objective (target + normal alignment), NO overlap penalty
+        obj_val = objective(
+            x,
+            movables_subset,
+            fixed_obstacles_subset,
+            fixed_obstacles,
+            target_weight,
+            normal_weight,
+            overlap_weight=0.0,  # Turn OFF overlap penalty
+            min_separation=min_separation,
+            margin_ratio=margin_ratio,
+            movable_sizes=movable_sizes,
+            fixed_sizes=fixed_sizes,
+        )
+
+        return obj_val
 
     for restart_idx in range(num_restarts):
-        # Better initialization: try to start near targets but check feasibility
-        max_init_attempts = 10
-        x0 = None
-
-        for init_attempt in range(max_init_attempts):
-            x0_candidate = generate_initial_point(movables, fixed_obstacles, init_attempt, prev_solution=None)
-
-
-            # Check if initial point is feasible
-            is_feasible, min_const, violations = check_feasibility(
-                x0_candidate, constraints, verbose=False
-            )
-            if is_feasible or init_attempt == max_init_attempts - 1:
-                x0 = x0_candidate
-                if not is_feasible:
-                    print(
-                        f"Restart {restart_idx + 1}: Starting from infeasible point (min constraint: {min_const:.6f})"
-                    )
-                break
-
-        if x0 is None:
-            x0 = np.array([m["target"] for m in movables]).reshape(-1)
-
         try:
-            res = minimize(
-                cost_func,
-                x0,
-                method="SLSQP",
-                bounds=bounds,
-                constraints=constraints,
-                # options={"maxiter": maxiter, "disp": True, "ftol": 1e-8},
-            )
+            # Loop over each batch
+            for batch_num in range(num_batches):
+                batch_start = batch_num * batch_size
+                batch_end = min(batch_start + batch_size, len(movables))
+                actual_batch_size = batch_end - batch_start
 
-            # Check if solution is feasible (all constraints satisfied)
-            is_feasible, min_constraint, violations = check_feasibility(
-                res.x, constraints, verbose=False
-            )
+                # ==================== STAGE 1: Soft Penalty Optimization ====================
+                print("\n" + "=" * 80)
+                print("STAGE 1: Optimization with soft overlap penalties (no hard constraints)")
+                print("=" * 80)
+                # Extract initial positions for this batch (2 coords per movable: x, y)
+                x0_batch = x0[batch_start * 2 : batch_end * 2]
 
-            # Only accept feasible solutions
-            if is_feasible:
-                if best is None or res.fun < best.fun:
-                    best = res
-                    best_initial = x0.copy()
-                    print(
-                        f"Restart {restart_idx + 1}: Found feasible solution with cost {res.fun:.6f}, "
-                        f"min constraint: {min_constraint:.6f}"
-                    )
-                    prev_solution = res.x.copy()
-                    # If we found a very good solution, break early
-                    if res.fun < 1e-3:
-                        break
-            else:
-                # Debug: show which constraints are most violated
-                print(
-                    f"Restart {restart_idx + 1}: Infeasible solution (min constraint: {min_constraint:.6f})"
+                # Stage 1: NO constraints, only soft penalties
+                res_stage1 = minimize(
+                    cost_func_stage1,
+                    x0_batch,
+                    args=(batch_num, actual_batch_size),
+                    method="trust-constr",
+                    jac="2-point",
+                    hess=BFGS(),
+                    bounds=bounds[batch_start * 2 : batch_end * 2],
+                    constraints=constraints,
+                    options={"maxiter": 5000, "verbose": 3},
                 )
-                print(f"  Most violated constraints:")
-                sorted_violations = sorted(
-                    enumerate(violations), key=lambda x: x[1]
-                )[:5]
-                for idx, val in sorted_violations:
-                    constraint_type = (
-                        "overlap"
-                        if idx < len(overlap_constraints)
-                        else "positive-side"
-                    )
-                    print(f"    Constraint {idx} ({constraint_type}): {val:.6f}")
 
+                # Store Stage 1 result
+                result[batch_start * 2 : batch_end * 2] = res_stage1.x
+                print(f"Stage 1 - Batch {batch_num + 1} Result: {res_stage1.fun:.6e}")
 
         except Exception as e:
-            print(f"Restart {restart_idx + 1}: Optimization failed: {e}")
+            print(f"Stage 1 - Restart {restart_idx + 1}: Optimization failed: {e}")
             continue
 
-    if best is None:
+    # ==================== STAGE 2: Hard Constraint Refinement ====================
+    print("\n" + "=" * 80)
+    print("STAGE 2: Refinement with hard overlap constraints (no penalty)")
+    print("=" * 80)
+
+
+    # Use Stage 1 result as starting point for Stage 2
+    x0_stage2 = result.copy()
+
+    for restart_idx in range(1):  # Usually 1 restart is enough for Stage 2
+        try:
+            # Loop over each batch
+            for batch_num in range(num_batches):
+                batch_start = batch_num * batch_size
+                batch_end = min(batch_start + batch_size, len(movables))
+                actual_batch_size = batch_end - batch_start
+
+                print(
+                    f"\nStage 2 - Batch {batch_num + 1}/{num_batches} (movables {batch_start}-{batch_end - 1})"
+                )
+
+                # Extract Stage 1 solution as initial point for Stage 2
+                x0_batch_stage2 = x0_stage2[batch_start * 2 : batch_end * 2]
+
+                # Stage 2: WITH hard overlap constraints
+                res_stage2 = minimize(
+                    cost_func_stage2,
+                    x0_batch_stage2,
+                    args=(batch_num, actual_batch_size),
+                    method="trust-constr",
+                    jac="2-point",
+                    hess=BFGS(),
+                    bounds=bounds[batch_start * 2 : batch_end * 2],
+                    constraints=constraints,  # Activate hard constraints
+                    options={"maxiter": 5000, "verbose": 3},
+                )
+
+                # Store Stage 2 final result
+                result[batch_start * 2 : batch_end * 2] = res_stage2.x
+                print(f"Stage 2 - Batch {batch_num + 1} Result: {res_stage2.fun:.6e}")
+
+        except Exception as e:
+            print(f"Stage 2 - Batch {batch_num + 1}: Optimization failed: {e}")
+            print("Using Stage 1 result for this batch")
+            continue
+
+    if result is None:
         print(
             "Warning: No feasible solution found. Try increasing num_restarts or adjusting min_separation."
         )
 
-    return best, best_initial
+    # Calculate search radius for visualization (same as in create_non_overlap_constraints)
+    movable_sizes = [polygon_characteristic_size(m["verts"]) for m in movables]
+    valid_fixed_obstacles = [
+        obs for obs in fixed_obstacles if obs.get("center") is not None
+    ]
+    fixed_sizes = [
+        polygon_characteristic_size(obs["verts"]) for obs in valid_fixed_obstacles
+    ]
+
+    if len(movable_sizes) > 0 and len(fixed_sizes) > 0:
+        max_movable_size = np.max(movable_sizes)
+        max_fixed_size = np.max(fixed_sizes)
+        search_radius = (max_movable_size) * 2
+    else:
+        search_radius = 0.0
+
+    return result, x0, search_radius
