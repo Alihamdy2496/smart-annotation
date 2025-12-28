@@ -285,7 +285,7 @@ if __name__ == "__main__":
         num_restarts,
         maxiter,
         placement_bounds,
-        min_separation=0.0,
+        min_separation=0.5,
         margin_ratio=0.1,
         target_weight=100.0,
         normal_weight=100.0,

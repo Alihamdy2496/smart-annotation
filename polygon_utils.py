@@ -17,7 +17,7 @@ def sort_vertices_ccw(verts):
     # Compute centroid
     c = np.mean(verts, axis=0)
     # Compute angle of each vertex around centroid
-    angles = np.arctan2(verts[:,1] - c[1], verts[:,0] - c[0])
+    angles = np.arctan2(verts[:, 1] - c[1], verts[:, 0] - c[0])
     return verts[np.argsort(angles)]
 
 
@@ -132,17 +132,112 @@ def project_polygon(axis, verts):
     return np.min(proj), np.max(proj)
 
 
+def get_precomputed_geometry(verts, angle=0.0):
+    """
+    Precompute convex hull, rotated vertices, and normals for a polygon.
+    This avoids redundant calculations during optimization.
+    """
+    hull = get_convex_hull_vertices(verts, closed=False)
+    # Rotate hull once to world orientation (if angle is fixed)
+    if angle != 0.0:
+        c, s = np.cos(angle), np.sin(angle)
+        R = np.array([[c, -s], [s, c]])
+        hull_rotated = hull @ R.T
+    else:
+        hull_rotated = hull.copy()
+
+    edges = polygon_edges(hull_rotated)
+    normals = normals_from_edges(edges)
+
+    return {"hull": hull_rotated, "normals": normals}
+
+
+def separating_distance_SAT_precomputed(
+    hullA, hullB, normalsA, normalsB, return_normal=False
+):
+    """
+    Fast, vectorized SAT implementation using precomputed hulls and normals.
+    """
+    # Combine normals from both polygons as axes
+    axes = np.vstack([normalsA, normalsB])
+
+    # Project both hulls onto all axes at once (vectorized)
+    # hullA: (Na, 2), axes: (Naxes, 2) -> projA: (Na, Naxes)
+    projA = hullA @ axes.T
+    projB = hullB @ axes.T
+
+    minA, maxA = projA.min(axis=0), projA.max(axis=0)
+    minB, maxB = projB.min(axis=0), projB.max(axis=0)
+
+    # Check for separation on each axis
+    # separation > 0 means separated, < 0 means overlap depth
+    seps = np.maximum(minB - maxA, minA - maxB)
+
+    # If any separation is positive, the polygons are separated
+    # The true separation distance is the maximum of these
+    max_sep = np.max(seps)
+
+    if max_sep >= 0:
+        if not return_normal:
+            return max_sep
+
+        # For separation, we want the axis with the smallest positive separation
+        # (the "tightest" separation axis)
+        sep_indices = np.where(seps >= 0)[0]
+        best_idx = sep_indices[np.argmin(seps[sep_indices])]
+
+        # Determine normal direction: push A away from B
+        axis = axes[best_idx]
+        if minB[best_idx] - maxA[best_idx] > minA[best_idx] - maxB[best_idx]:
+            # B is "ahead" of A along axis, push A back
+            normal = -axis
+        else:
+            # A is "ahead" of B along axis, push A forward
+            normal = axis
+
+        return max_sep, normal, 0.0
+    else:
+        # All axes show overlap, polygons overlap
+        # Penetration depth is the minimum overlap (smallest absolute value)
+        # which is the maximum of the negative separations
+        penetration = -max_sep
+
+        if not return_normal:
+            return max_sep  # returns negative value for overlap
+
+        # Find axis with minimum penetration
+        best_idx = np.argmax(seps)
+        axis = axes[best_idx]
+
+        # Determine direction: push A away from B
+        if maxA[best_idx] - minB[best_idx] < maxB[best_idx] - minA[best_idx]:
+            normal = -axis
+        else:
+            normal = axis
+
+        return max_sep, normal, penetration
+
+
 def separating_distance(polyA, polyB):
     return separating_distance_GJK_EPA(polyA, polyB)
 
 
-def separating_distance_SAT(polyA, polyB):
+def separating_distance_SAT(polyA, polyB, return_normal=False):
     """
     Compute separating distance along all SAT axes.
     If positive => separated; if negative => overlap depth.
 
     Uses Separating Axis Theorem (SAT) for collision detection.
     Uses convex hull vertices for consistent collision detection.
+
+    Args:
+        polyA: First polygon vertices
+        polyB: Second polygon vertices
+        return_normal: If True, also return the normal vector and penetration
+
+    Returns:
+        If return_normal=False: separation distance (float)
+        If return_normal=True: tuple of (separation, normal, penetration)
     """
     # Get convex hull vertices for both polygons (consistent with polygon_edges)
     hullA = get_convex_hull_vertices(polyA, closed=False)
@@ -161,11 +256,17 @@ def separating_distance_SAT(polyA, polyB):
 
     # If no edges, return a large separation
     if len(axes) == 0:
+        if return_normal:
+            return np.inf, np.array([1.0, 0.0]), 0.0
         return np.inf
 
-    # Track maximum overlap depth (negative) and minimum separation (positive)
-    max_overlap = -np.inf
+    # Track minimum overlap depth (for penetration) and minimum separation (for distance)
+    min_overlap = np.inf
     min_separation = np.inf
+    best_overlap_axis = None
+    best_overlap_sign = 1.0
+    best_sep_axis = None
+    best_sep_sign = 1.0
 
     for a in axes:
         a = a / (np.linalg.norm(a) + 1e-12)
@@ -174,22 +275,44 @@ def separating_distance_SAT(polyA, polyB):
         minB, maxB = project_polygon(a, hullB)
 
         # Check if intervals overlap on this axis
-        if maxA >= minB and maxB >= minA:
+        if maxA > minB and maxB > minA:
             # Overlapping: compute overlap depth
             overlap_depth = min(maxA - minB, maxB - minA)
-            max_overlap = max(max_overlap, overlap_depth)
+            if overlap_depth < min_overlap:
+                min_overlap = overlap_depth
+                best_overlap_axis = a.copy()
+                # Determine direction: push A away from B
+                # If maxA is closer to minB, push A in negative axis direction
+                if maxA - minB < maxB - minA:
+                    best_overlap_sign = -1.0
+                else:
+                    best_overlap_sign = 1.0
         else:
             # Separated on this axis: compute separation distance
-            # When separated, one of these will be positive (the actual separation)
             separation = max(minB - maxA, minA - maxB)
-            min_separation = min(min_separation, separation)
+            if separation < min_separation:
+                min_separation = separation
+                best_sep_axis = a.copy()
+                # Determine direction: push A away from B
+                if minB - maxA > minA - maxB:
+                    # B is to the right of A, push A to the left
+                    best_sep_sign = -1.0
+                else:
+                    # A is to the right of B, push A to the right
+                    best_sep_sign = 1.0
 
     # If we found any separation axis, polygons are separated
     if min_separation < np.inf:
+        if return_normal:
+            normal = best_sep_axis * best_sep_sign
+            return min_separation, normal, 0.0
         return min_separation  # Positive: separation distance
     else:
         # All axes show overlap, polygons overlap
-        return -max_overlap  # Negative: overlap depth
+        if return_normal:
+            normal = best_overlap_axis * best_overlap_sign
+            return -min_overlap, normal, min_overlap
+        return -min_overlap  # Negative: overlap depth
 
 
 def separating_distance_GJK_EPA(polyA, polyB):
