@@ -21,6 +21,8 @@ The system uses a physics-inspired relaxation approach:
 2.  **Projection**: When an overlap is detected, we calculate the minimum translation vector (MTV) required to separate the objects.
 3.  **Iterative Solver**: We apply these translation vectors iteratively. In each step, objects are "pushed" away from overlaps. This repeats until convergence (zero overlaps) or a maximum iteration count is reached.
 
+![Projection Test Result](projection_test_result.png)
+
 ### Performance Optimizations
 
 To handle hundreds of objects efficiently, we implemented several key optimizations:
