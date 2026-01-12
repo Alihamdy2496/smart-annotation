@@ -26,7 +26,7 @@ if __name__ == "__main__":
     start_time = time.time()
     result, x0 = optimize(movables, fixed_obstacles)
     end_time = time.time()
-    print(f"Optimization completed in {end_time - start_time:.2f} seconds")
+    print(f"Optimization completed in {end_time - start_time:.2f} seconds, {(end_time - start_time)/60:.2f} minutes")
 
     # Save optimized output
     save_optimized_output(result, movables, output_path="output.json")
