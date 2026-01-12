@@ -66,7 +66,9 @@ for item in data:
     #   target = Origin
 
     origin = np.array([item["Origin"]["X"], item["Origin"]["Y"]])
+    origin_z = item["Origin"]["Z"]
     verts_absolute = np.array([[v["X"], v["Y"]] for v in item["Vertices"]])
+    verts_z = [v["Z"] for v in item["Vertices"]]
     verts_local = verts_absolute - origin
 
     element = {
@@ -78,6 +80,8 @@ for item in data:
 
     if item.get("IsMovable"):
         element["target"] = origin
+        element["origin_z"] = origin_z
+        element["verts_z"] = verts_z
         movables.append(element)
     elif item.get("IsFixed"):
         element["center"] = origin
@@ -109,6 +113,55 @@ print(f"Computed placement bounds: X={placement_bounds[0]}, Y={placement_bounds[
 
 num_restarts = 1
 maxiter = 8000
+
+
+def save_optimized_output(xvec, movables, output_path="output.json"):
+    """
+    Save the optimized movables to a JSON file with the same format as the input.
+
+    Args:
+        xvec: Optimized positions vector
+        movables: List of movable object dictionaries
+        output_path: Path to save the output JSON file
+    """
+    pts = unpack_xy(xvec)
+
+    output_data = []
+
+    for i, p in enumerate(pts):
+        movable = movables[i]
+
+        # Convert local vertices to absolute coordinates using optimized position
+        # Vertices need to be rotated and translated to the optimized position
+        verts_absolute = translate_polygon(
+            movable["verts"], p, movable["RotationAngle"]
+        )
+
+        # Create output element
+        element = {
+            "ElementId": movable["ElementId"],
+            "HostElementId": movable["HostElementId"],
+            "IsMovable": True,
+            "IsFixed": False,
+            "RotationAngle": movable["RotationAngle"],
+            "Origin": {
+                "X": float(p[0]),
+                "Y": float(p[1]),
+                "Z": float(movable["origin_z"]),
+            },
+            "Vertices": [
+                {"X": float(v[0]), "Y": float(v[1]), "Z": float(movable["verts_z"][j])}
+                for j, v in enumerate(verts_absolute)
+            ],
+        }
+
+        output_data.append(element)
+
+    # Save to JSON file
+    with open(output_path, "w") as f:
+        json.dump(output_data, f, indent=2)
+
+    print(f"Saved optimized output to {output_path}")
 
 
 def plot_result(
@@ -290,6 +343,9 @@ if __name__ == "__main__":
         target_weight=100.0,
         normal_weight=100.0,
     )
+
+    # Save optimized output
+    save_optimized_output(result, movables)
 
     # Visualize results
     plot_result(result, x0, movables, fixed_obstacles, placement_bounds, search_radius)

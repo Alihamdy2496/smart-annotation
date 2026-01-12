@@ -121,13 +121,14 @@ print()
 # Find overlaps before projection
 overlaps_before = find_all_overlaps(x_initial, movables, fixed_obstacles)
 print(f"Overlaps before projection: {len(overlaps_before)}")
-for i, (idx_i, idx_j, penetration, normal) in enumerate(overlaps_before):
+for i, (idx_i, idx_j, penetration, normal, avg_size) in enumerate(overlaps_before):
     if idx_j is None:
         print(f"  Overlap {i + 1}: Movable {idx_i} vs Fixed obstacle")
     else:
         print(f"  Overlap {i + 1}: Movable {idx_i} vs Movable {idx_j}")
     print(f"    Penetration: {penetration:.4f}")
     print(f"    Normal: [{normal[0]:.4f}, {normal[1]:.4f}]")
+    print(f"    Avg Size: {avg_size:.4f}")
 print()
 
 # Apply projection with minimum separation
@@ -152,7 +153,7 @@ if len(overlaps_after) == 0:
     print("  ✓ All overlaps successfully resolved!")
 else:
     print("  ✗ Some overlaps remain:")
-    for i, (idx_i, idx_j, penetration, normal) in enumerate(overlaps_after):
+    for i, (idx_i, idx_j, penetration, normal, avg_size) in enumerate(overlaps_after):
         if idx_j is None:
             print(f"    Overlap {i + 1}: Movable {idx_i} vs Fixed obstacle")
         else:
