@@ -152,169 +152,6 @@ def project_to_nonoverlap(
     # If we are processing a SINGLE movable against a list of fixed obstacles,
     # we can use the fast Numba path.
 
-    use_numba = (len(movables) == 1) and (len(fixed_obstacles) > 0)
-
-    if False:
-        # Prepare geometry for the single movable
-        # It changes position every iteration, so we pass its current verts/normals
-        # But its shape/rotation is constant, so we can pre-calc the local rotated shape
-        m = movables[0]
-        # Get local rotated verts (centered at 0,0)
-        # m["verts"] is local. Rotate it.
-        c, s = np.cos(m.get("RotationAngle", 0.0)), np.sin(m.get("RotationAngle", 0.0))
-        R = np.array([[c, -s], [s, c]])
-        local_verts_rotated = m["verts"] @ R.T
-
-        # Compute normals for the movable once
-        # (Same logic as pack_geometry but for single item)
-        verts_next = np.roll(local_verts_rotated, -1, axis=0)
-        edges = verts_next - local_verts_rotated
-        local_normals = np.zeros_like(edges)
-        local_normals[:, 0] = -edges[:, 1]
-        local_normals[:, 1] = edges[:, 0]
-        norms = np.sqrt(local_normals[:, 0] ** 2 + local_normals[:, 1] ** 2)
-        norms[norms < 1e-12] = 1.0
-        local_normals /= norms[:, np.newaxis]
-
-        # Pack fixed obstacles ONCE
-        # We need their WORLD space vertices
-        fixed_polys_world = []
-        for obs in fixed_obstacles:
-            # Translate to world space
-            v_world = translate_polygon(
-                obs["verts"], obs["center"], obs.get("RotationAngle", 0.0)
-            )
-            fixed_polys_world.append({"verts": v_world})
-
-        packed_fixed_verts, packed_fixed_normals, fixed_offsets, fixed_counts = (
-            pack_geometry(fixed_polys_world)
-        )
-
-        # Optimization loop
-        current_pos = pts[0].copy()
-
-        for iteration in range(max_proj_iters):
-            # Update movable vertices to current position
-            curr_verts_world = local_verts_rotated + current_pos
-
-            # Check collisions using Numba
-            # We pass the normals (rotation doesn't change, so normals are same direction)
-            # Wait, normals are direction vectors. Translation doesn't change them!
-            # So local_normals are valid for world space too.
-
-            count, collisions = check_collisions_numba(
-                curr_verts_world,
-                local_normals,
-                packed_fixed_verts,
-                packed_fixed_normals,
-                fixed_offsets,
-                fixed_counts,
-                min_separation,
-            )
-
-            if count == 0:
-                break
-
-            # Resolve collisions
-            # Average push vector? Or max?
-            # Let's sum them for "soft" resolution or take max for "hard".
-            # Summing is usually more stable for multiple overlaps.
-
-            total_push = np.zeros(2)
-            max_push_len = 0.0
-
-            for i in range(count):
-                dist = collisions[i, 0]
-                nx = collisions[i, 1]
-                ny = collisions[i, 2]
-
-                # Push vector
-                push = np.array([nx, ny]) * dist
-                total_push += push
-                max_push_len = max(max_push_len, dist)
-
-            # Apply correction
-            # Damping factor to prevent oscillation
-            # For single movable vs fixed obstacles, we can be aggressive (0.9)
-            alpha = 0.5
-            current_pos += total_push * alpha
-
-        # Final check and aggressive cleanup for any remaining overlaps
-        final_count, collisions = check_collisions_numba(
-            local_verts_rotated + current_pos,
-            local_normals,
-            packed_fixed_verts,
-            packed_fixed_normals,
-            fixed_offsets,
-            fixed_counts,
-            min_separation,
-        )
-
-        if final_count > 0:
-            # # Aggressive cleanup loop
-            # # Greedy strategy: Resolve the WORST overlap only in each iteration
-            # # This mimics the original implementation's final pass and prevents force cancellation
-            # prev_final_count = final_count
-            # stuck_counter = 0
-
-            # for cleanup_iter in range(200):
-            #     if final_count == 0:
-            #         break
-
-            #     # Check if stuck
-            #     if final_count >= prev_final_count:
-            #         stuck_counter += 1
-            #     else:
-            #         stuck_counter = 0
-            #         prev_final_count = final_count
-
-            #     # If stuck, apply random perturbation
-            #     if stuck_counter > 10:
-            #         # Random kick to escape local minimum
-            #         angle = np.random.uniform(0, 2 * np.pi)
-            #         dist = min_separation * 0.5
-            #         perturbation = np.array([np.cos(angle), np.sin(angle)]) * dist
-            #         current_pos += perturbation
-            #         stuck_counter = 0  # Reset
-            #     else:
-            #         # Find worst overlap
-            #         worst_idx = -1
-            #         max_dist = -1.0
-
-            #         for i in range(final_count):
-            #             if collisions[i, 0] > max_dist:
-            #                 max_dist = collisions[i, 0]
-            #                 worst_idx = i
-
-            #         if worst_idx >= 0:
-            #             # Push fully out of the worst overlap + safety
-            #             dist = collisions[worst_idx, 0]
-            #             nx = collisions[worst_idx, 1]
-            #             ny = collisions[worst_idx, 2]
-
-            #             push = np.array([nx, ny]) * (dist * 1.05)
-            #             current_pos += push
-
-            #     # Re-check
-            #     final_count, collisions = check_collisions_numba(
-            #         local_verts_rotated + current_pos,
-            #         local_normals,
-            #         packed_fixed_verts,
-            #         packed_fixed_normals,
-            #         fixed_offsets,
-            #         fixed_counts,
-            #         min_separation,
-            #     )
-            print(
-                f"WARNING: Numba path finished with {final_count} unresolved overlaps. Falling back to robust Python implementation."
-            )
-            # Update pts with the best position found so far by Numba
-            # This gives the Python implementation a better starting point
-            pts[0] = current_pos
-        else:
-            return current_pos.reshape(-1)
-
-    # --- Original Logic for Batch Processing (Stage 1 & 3) ---
     # === OPTIMIZATION 1: Precompute geometry once ===
     for m in movables:
         if "precomputed" not in m:
@@ -330,7 +167,7 @@ def project_to_nonoverlap(
     # Pre-compute object sizes for spatial filtering
     movable_sizes = [polygon_characteristic_size(m["verts"]) for m in movables]
     max_movable_size = np.max(movable_sizes) if len(movable_sizes) > 0 else 1.0
-    search_radius = max_movable_size * 20  # 4x safety factor
+    search_radius = max_movable_size * 4  # 4x safety factor
 
     # === OPTIMIZATION 2: Early convergence tracking ===
     prev_max_penetration = float("inf")
@@ -515,8 +352,8 @@ def project_to_nonoverlap(
                 if j is not None and j in resolved_indices:
                     continue
 
-                # Aggressive push with 5% extra to ensure clean separation
-                push_factor = 1.05
+                # Aggressive push with 50% extra to ensure clean separation
+                push_factor = 1.5
                 if j is None:
                     pts[i] += push_factor * separation_distance * normal
                     resolved_indices.add(i)

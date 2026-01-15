@@ -3,7 +3,7 @@ Polygon utility functions for convex hull computation, collision detection, and 
 """
 
 import numpy as np
-from scipy.spatial import ConvexHull
+# from scipy.spatial import ConvexHull
 
 
 def unpack_xy(xvec):
@@ -89,21 +89,21 @@ def get_convex_hull_vertices(verts, closed=False):
             return np.vstack([verts, verts[0:1]])
         return verts
 
-    try:
-        # Compute convex hull
-        hull = ConvexHull(verts)
-        # Get vertices in counter-clockwise order
-        hull_verts = verts[hull.vertices]
-        if closed:
-            # Close the polygon by appending first vertex
-            return np.vstack([hull_verts, hull_verts[0:1]])
-        return hull_verts
-    except:
-        # Fallback: if convex hull fails, sort vertices
-        sorted_verts = sort_vertices_ccw(verts)
-        if closed:
-            return np.vstack([sorted_verts, sorted_verts[0:1]])
-        return sorted_verts
+    # try:
+    #     # Compute convex hull
+    #     hull = ConvexHull(verts)
+    #     # Get vertices in counter-clockwise order
+    #     hull_verts = verts[hull.vertices]
+    #     if closed:
+    #         # Close the polygon by appending first vertex
+    #         return np.vstack([hull_verts, hull_verts[0:1]])
+    #     return hull_verts
+    # except:
+    #     # Fallback: if convex hull fails, sort vertices
+    sorted_verts = sort_vertices_ccw(verts)
+    if closed:
+        return np.vstack([sorted_verts, sorted_verts[0:1]])
+    return sorted_verts
 
 
 def polygon_edges(verts):
@@ -149,7 +149,7 @@ def separating_distance_SAT_precomputed(
     hullA, hullB, normalsA, normalsB, return_normal=False
 ):
     """
-    Fast, vectorized SAT implementation using precomputed hulls and normals.
+    Fast, vectorized cv implementation using precomputed hulls and normals.
     """
     # Combine normals from both polygons as axes
     axes = np.vstack([normalsA, normalsB])
