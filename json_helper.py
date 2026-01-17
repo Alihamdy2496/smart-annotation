@@ -46,6 +46,10 @@ def load_problem_data(json_path):
             element["center"] = origin
             fixed_obstacles.append(element)
 
+    print(
+        f"Loaded {len(movables)} movable objects and {len(fixed_obstacles)} fixed obstacles."
+    )
+
     # Compute placement bounds from the data
     all_coords = []
     for item in data:

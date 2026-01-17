@@ -15,6 +15,26 @@ from polygon_utils import (
 from numba_utils import pack_geometry, check_collisions_numba
 
 
+def calculate_displacement_metric(x_initial, x_final):
+    """
+    Calculate the average displacement of objects from their original positions.
+    D = (1/N) * sum(|x_final_i - x_original_i|)
+
+    Args:
+        x_initial: Initial positions (flattened)
+        x_final: Final positions (flattened)
+
+    Returns:
+        Average displacement value
+    """
+    pts_initial = unpack_xy(x_initial)
+    pts_final = unpack_xy(x_final)
+
+    displacements = np.linalg.norm(pts_final - pts_initial, axis=1)
+    avg_displacement = np.mean(displacements)
+    return avg_displacement
+
+
 def find_all_overlaps(x, movables, fixed_obstacles, min_separation=0.0):
     """
     Find all overlapping pairs between movables and between movables and fixed obstacles.
@@ -256,7 +276,7 @@ def project_to_nonoverlap(
         max_penetration = overlaps[0][2]
         if abs(prev_max_penetration - max_penetration) < tolerance:
             no_progress_count += 1
-            if no_progress_count >= 50:
+            if no_progress_count >= 25:
                 # Converged - no significant progress
                 break
         else:
@@ -424,95 +444,102 @@ def optimize(
     Returns:
         Tuple of (best result, initial position vector for best result)
     """
-    # ==================== STAGE 2: Batch-by-batch refinement with min_separation ====================
-    print("\n" + "=" * 80)
     min_separation = 0.5
-    print(f"STAGE 2: Batch-by-batch refinement with min_separation={min_separation}")
-    print("=" * 80)
+
     x0 = np.array([movable["target"] for movable in movables]).reshape(-1)
     result = x0.copy()
 
-    # Process each batch individually with tighter separation
-    batch_size = 1
-    num_batches = len(movables)
+    # Check initial overlaps
+    initial_overlaps = find_all_overlaps(
+        x0, movables, fixed_obstacles, min_separation=0.0
+    )
+    print(f"Initial number of overlaps: {len(initial_overlaps)}")
 
-    for batch_num in range(num_batches):
-        batch_start = batch_num * batch_size
-        batch_end = min(batch_start + batch_size, len(movables))
+    # # ==================== STAGE 1: Batch-by-batch refinement with min_separation ====================
+    # # Process each batch individually with tighter separation
+    # print("\n" + "=" * 80)
+    # print(f"STAGE 1: Batch-by-batch refinement with min_separation={min_separation}")
+    # print("=" * 80)
+    # batch_size = 1
+    # num_batches = len(movables)
 
-        print(f"\nStage 1 - Projecting Batch {batch_num + 1}/{num_batches}...")
+    # for batch_num in range(num_batches):
+    #     batch_start = batch_num * batch_size
+    #     batch_end = min(batch_start + batch_size, len(movables))
 
-        # Create temporary fixed obstacles from all OTHER movables + original fixed obstacles
-        temp_fixed = list(fixed_obstacles)
-        for other_idx in range(len(movables)):
-            if other_idx < batch_start or other_idx >= batch_end:
-                temp_fixed.append(
-                    {
-                        "verts": movables[other_idx]["verts"],
-                        "center": movables[other_idx]["target"],
-                        "RotationAngle": movables[other_idx].get("RotationAngle", 0.0),
-                    }
-                )
+    #     print(f"\nStage 1 - Projecting Batch {batch_num + 1}/{num_batches}...")
 
-        # Project current batch positions with tighter separation
-        x_batch = result[batch_start * 2 : batch_end * 2]
-        x_projected = project_to_nonoverlap(
-            x_batch,
-            movables[batch_start:batch_end],
-            temp_fixed,
-            max_proj_iters=300,
-            min_separation=min_separation,
-        )
+    #     # Create temporary fixed obstacles from all OTHER movables + original fixed obstacles
+    #     temp_fixed = list(fixed_obstacles)
+    #     for other_idx in range(len(movables)):
+    #         if other_idx < batch_start or other_idx >= batch_end:
+    #             temp_fixed.append(
+    #                 {
+    #                     "verts": movables[other_idx]["verts"],
+    #                     "center": movables[other_idx]["target"],
+    #                     "RotationAngle": movables[other_idx].get("RotationAngle", 0.0),
+    #                 }
+    #             )
 
-        # Update result with projected positions
-        result[batch_start * 2 : batch_end * 2] = x_projected
-        print(f"Stage 1 - Batch {batch_num + 1} complete.")
+    #     # Project current batch positions with tighter separation
+    #     x_batch = result[batch_start * 2 : batch_end * 2]
+    #     x_projected = project_to_nonoverlap(
+    #         x_batch,
+    #         movables[batch_start:batch_end],
+    #         temp_fixed,
+    #         max_proj_iters=1,
+    #         min_separation=min_separation,
+    #     )
 
-    print("Stage 1 complete!")
+    #     # Update result with projected positions
+    #     result[batch_start * 2 : batch_end * 2] = x_projected
+    #     print(f"Stage 1 - Batch {batch_num + 1} complete.")
 
-    # ==================== STAGE 2: BATCH REFINEMENT ====================
-    min_separation = 1.5
-    print("\n" + "=" * 80)
-    print(f"STAGE 2: Batch-by-batch refinement with min_separation={min_separation}")
-    print("=" * 80)
+    # print("Stage 1 complete!")
 
-    # Process each batch individually with tighter separation
-    batch_size = 1
-    num_batches = len(movables)
+    # # ==================== STAGE 2: BATCH REFINEMENT ====================
+    # min_separation = 1.5
+    # print("\n" + "=" * 80)
+    # print(f"STAGE 2: Batch-by-batch refinement with min_separation={min_separation}")
+    # print("=" * 80)
 
-    for batch_num in range(num_batches):
-        batch_start = batch_num * batch_size
-        batch_end = min(batch_start + batch_size, len(movables))
+    # # Process each batch individually with tighter separation
+    # batch_size = 1
+    # num_batches = len(movables)
 
-        print(f"\nStage 2 - Projecting Batch {batch_num + 1}/{num_batches}...")
+    # for batch_num in range(num_batches):
+    #     batch_start = batch_num * batch_size
+    #     batch_end = min(batch_start + batch_size, len(movables))
 
-        # Create temporary fixed obstacles from all OTHER movables + original fixed obstacles
-        temp_fixed = list(fixed_obstacles)
-        for other_idx in range(len(movables)):
-            if other_idx < batch_start or other_idx >= batch_end:
-                temp_fixed.append(
-                    {
-                        "verts": movables[other_idx]["verts"],
-                        "center": result[other_idx * 2 : other_idx * 2 + 2],
-                        "RotationAngle": movables[other_idx].get("RotationAngle", 0.0),
-                    }
-                )
+    #     print(f"\nStage 2 - Projecting Batch {batch_num + 1}/{num_batches}...")
 
-        # Project current batch positions with tighter separation
-        x_batch = result[batch_start * 2 : batch_end * 2]
-        x_projected = project_to_nonoverlap(
-            x_batch,
-            movables[batch_start:batch_end],
-            temp_fixed,
-            max_proj_iters=300,
-            min_separation=min_separation,
-        )
+    #     # Create temporary fixed obstacles from all OTHER movables + original fixed obstacles
+    #     temp_fixed = list(fixed_obstacles)
+    #     for other_idx in range(len(movables)):
+    #         if other_idx < batch_start or other_idx >= batch_end:
+    #             temp_fixed.append(
+    #                 {
+    #                     "verts": movables[other_idx]["verts"],
+    #                     "center": result[other_idx * 2 : other_idx * 2 + 2],
+    #                     "RotationAngle": movables[other_idx].get("RotationAngle", 0.0),
+    #                 }
+    #             )
 
-        # Update result with projected positions
-        result[batch_start * 2 : batch_end * 2] = x_projected
-        print(f"Stage 2 - Batch {batch_num + 1} complete.")
+    #     # Project current batch positions with tighter separation
+    #     x_batch = result[batch_start * 2 : batch_end * 2]
+    #     x_projected = project_to_nonoverlap(
+    #         x_batch,
+    #         movables[batch_start:batch_end],
+    #         temp_fixed,
+    #         max_proj_iters=300,
+    #         min_separation=min_separation,
+    #     )
 
-    print("Stage 2 complete!")
+    #     # Update result with projected positions
+    #     result[batch_start * 2 : batch_end * 2] = x_projected
+    #     print(f"Stage 2 - Batch {batch_num + 1} complete.")
+
+    # print("Stage 2 complete!")
 
     # ==================== STAGE 3: FINAL TIGHTENING ====================
     min_separation = 1.5
@@ -524,9 +551,15 @@ def optimize(
         result,
         movables,
         fixed_obstacles,
-        max_proj_iters=300,
+        max_proj_iters=1,
         min_separation=min_separation,
     )
     result = result_stage3
     print("Stage 3 complete!")
+
+    # Check final overlaps
+    final_overlaps = find_all_overlaps(
+        result, movables, fixed_obstacles, min_separation=0.0
+    )
+    print(f"Final number of overlaps: {len(final_overlaps)}")
     return result, x0

@@ -6,7 +6,7 @@ runs the optimization, and visualizes the results.
 """
 
 import numpy as np
-from optimizer import optimize
+from optimizer import optimize, calculate_displacement_metric
 from json_helper import load_problem_data, save_optimized_output
 from plotting import plot_result
 import time
@@ -26,7 +26,13 @@ if __name__ == "__main__":
     start_time = time.time()
     result, x0 = optimize(movables, fixed_obstacles)
     end_time = time.time()
-    print(f"Optimization completed in {end_time - start_time:.2f} seconds, {(end_time - start_time)/60:.2f} minutes")
+    print(
+        f"Optimization completed in {end_time - start_time:.2f} seconds, {(end_time - start_time) / 60:.2f} minutes"
+    )
+
+    # Calculate and print displacement metric
+    displacement_metric = calculate_displacement_metric(x0, result)
+    print(f"Displacement Preservation Metric: {displacement_metric:.4f}")
 
     # Save optimized output
     save_optimized_output(result, movables, output_path="output.json")
