@@ -144,7 +144,7 @@ def merge_overlaps_by_first_object(overlaps, movables, min_separation=0.0):
     distance and normal with hullA.
 
     Args:
-        overlaps: List of tuples (i, j, separation_distance, normal, hullA, hullB)
+        overlaps: List of tuples (i, j, separation_distance, normal, hullA, hullB, direction_preference, is_pipe)
                  where j can be None for fixed obstacles
         movables: List of movable object dictionaries
         min_separation: Minimum separation distance
@@ -157,7 +157,17 @@ def merge_overlaps_by_first_object(overlaps, movables, min_separation=0.0):
     # Group overlaps by first object index (i)
     groups = defaultdict(list)
     for overlap in overlaps:
-        i, j, separation_distance, normal, hullA, hullB, direction_preference = overlap
+        (
+            i,
+            j,
+            separation_distance,
+            normal,
+            hullA,
+            hullB,
+            direction_preference,
+            is_pipe,
+            dist_to_target,
+        ) = overlap
         groups[i].append(overlap)
 
     merged_overlaps = []
@@ -167,13 +177,17 @@ def merge_overlaps_by_first_object(overlaps, movables, min_separation=0.0):
             # Only one overlap for this object, keep as is
             merged_overlaps.append(group[0])
         else:
+            # Check if any overlap is a pipe
+            pipe_overlap = next((o for o in group if o[7]), None)  # index 7 is is_pipe
+
             # Multiple overlaps for this object - merge all hullB into one
             # Get hullA from the first overlap (should be same for all)
-            _, _, _, _, hullA, _, _ = group[0]
+            # Also get dist_to_target from first overlap (same for all i)
+            _, _, _, _, hullA, _, _, _, dist_to_target = group[0]
 
             # Collect all hullB vertices
             all_hullB_vertices = []
-            for _, j, _, _, _, hullB, _ in group:
+            for _, j, _, _, _, hullB, _, _, _ in group:
                 all_hullB_vertices.append(hullB)
 
             # Merge all hullB vertices into one array
@@ -182,28 +196,69 @@ def merge_overlaps_by_first_object(overlaps, movables, min_separation=0.0):
             # Compute convex hull of merged vertices
             merged_hullB = get_convex_hull_vertices(merged_vertices, closed=False)
 
-            # Compute normals for both hulls
-            edgesA = polygon_edges(hullA)
-            normalsA = normals_from_edges(edgesA)
-            edgesB = polygon_edges(merged_hullB)
-            normalsB = normals_from_edges(edgesB)
+            if pipe_overlap:
+                # Use normal from pipe overlap
+                # normal = pipe_overlap[3]
 
-            # Recalculate separation distance and normal
-            sep, normal, penetration = separating_distance_SAT_precomputed(
-                hullA,
-                merged_hullB,
-                normalsA,
-                normalsB,
-                return_normal=True,
-            )
+                # # Recalculate separation distance for the merged hull along this normal
+                # # We want to push A along normal to clear merged_hullB
+                # # sep = max(dot(B_verts, n)) - min(dot(A_verts, n))
 
-            # Create merged overlap
-            # Set j to None to indicate this is a merged overlap (treat as fixed)
-            # Use default direction_preference=1 for merged overlaps
-            separation_distance = min_separation - sep
-            merged_overlaps.append(
-                (i, None, separation_distance, normal, hullA, merged_hullB, 1)
-            )
+                # # Vertices of A (hullA is vertices)
+                # min_A = np.min(np.dot(hullA, normal))
+                # max_B = np.max(np.dot(merged_hullB, normal))
+
+                # # Separation required to clear overlap
+                # sep = max_B - min_A
+
+                # separation_distance = sep + min_separation
+
+                merged_overlaps.append(
+                    (
+                        i,
+                        None,
+                        pipe_overlap[2],
+                        pipe_overlap[3],
+                        pipe_overlap[4],
+                        merged_hullB,
+                        1,
+                        True,
+                        dist_to_target,
+                    )
+                )
+            else:
+                # Compute normals for both hulls
+                edgesA = polygon_edges(hullA)
+                normalsA = normals_from_edges(edgesA)
+                edgesB = polygon_edges(merged_hullB)
+                normalsB = normals_from_edges(edgesB)
+
+                # Recalculate separation distance and normal
+                sep, normal, penetration = separating_distance_SAT_precomputed(
+                    hullA,
+                    merged_hullB,
+                    normalsA,
+                    normalsB,
+                    return_normal=True,
+                )
+
+                # Create merged overlap
+                # Set j to None to indicate this is a merged overlap (treat as fixed)
+                # Use default direction_preference=1 for merged overlaps
+                separation_distance = min_separation - sep
+                merged_overlaps.append(
+                    (
+                        i,
+                        None,
+                        separation_distance,
+                        normal,
+                        hullA,
+                        merged_hullB,
+                        1,
+                        False,
+                        dist_to_target,
+                    )
+                )
 
     return merged_overlaps
 
@@ -265,11 +320,6 @@ def project_to_nonoverlap(
     max_movable_size = np.max(movable_sizes) if len(movable_sizes) > 0 else 1.0
     search_radius = max_movable_size * 200  # 4x safety factor
 
-    # === OPTIMIZATION 2: Early convergence tracking ===
-    prev_max_penetration = float("inf")
-    tolerance = 1e-8
-    no_progress_count = 0
-
     # Helper function for collision check (handles both movable-movable and movable-fixed)
     def check_collision(i, j=None, obs=None):
         """
@@ -296,6 +346,9 @@ def project_to_nonoverlap(
             hullB = obs["precomputed"]["hull"] + obs["center"]
             normalsB = obs["precomputed"]["normals"]
 
+        # Calculate distance to target for sorting
+        dist_to_target = np.linalg.norm(pts[i] - movables[i]["target"])
+
         sep, normal, penetration = separating_distance_SAT_precomputed(
             hullA,
             hullB,
@@ -306,19 +359,6 @@ def project_to_nonoverlap(
 
         if sep < min_separation - 1e-6:
             separation_distance = min_separation - sep
-
-            # === SMART DIRECTION SELECTION ===
-            # Test both push directions and choose the one with fewer new overlaps
-            direction_preference = 1  # Default: use normal direction
-
-            # Calculate test positions for both directions
-            test_push_distance = separation_distance
-            pos_normal = (
-                pts[i] + test_push_distance * normal
-            )  # Push in normal direction
-            pos_reversed = (
-                pts[i] - test_push_distance * normal
-            )  # Push in reversed direction
 
             # Count potential new overlaps for each direction
             def count_new_overlaps(test_pos):
@@ -361,6 +401,158 @@ def project_to_nonoverlap(
                         overlap_count += 1
 
                 return overlap_count
+
+            # Special condition for Pipes: always push away from closest edge
+            if j is None and obs.get("ElementType") == "Pipe":
+                # Get absolute vertices
+                # poly = translate_polygon(movables[i]["verts"], pts[i], movables[i]["RotationAngle"])
+                # hull_verts_calc = get_convex_hull_vertices(poly, closed=False)
+                # target  = np.mean(hull_verts_calc, axis=0)
+                target = movables[i]["target"]
+                pipe_verts = obs["verts"] + obs["center"]
+                poly = translate_polygon(
+                    obs["verts"], obs["center"], obs["RotationAngle"]
+                )
+                hull_verts_calc = get_convex_hull_vertices(poly, closed=False)
+                pipe_center = np.mean(hull_verts_calc, axis=0)
+
+                min_dist = float("inf")
+                best_dir = normal  # Fallback
+
+                num_verts = len(pipe_verts)
+                edges_info = []
+
+                # First pass: collect all edges and their lengths
+                for k in range(num_verts):
+                    p1 = pipe_verts[k]
+                    p2 = pipe_verts[(k + 1) % num_verts]
+                    edge = p2 - p1
+                    edge_len = np.linalg.norm(edge)
+                    edges_info.append(
+                        {
+                            "p1": p1,
+                            "p2": p2,
+                            "edge": edge,
+                            "length": edge_len,
+                            "index": k,
+                        }
+                    )
+
+                # Sort by length descending
+                edges_info.sort(key=lambda x: x["length"], reverse=True)
+
+                # Keep only the longest edges (top 2 for a 4-sided pipe)
+                # If it's not a 4-sided pipe, we might want to keep top 50% or similar
+                # But user specifically mentioned 4 lines (2 long, 2 short)
+                valid_edges = edges_info[:2]
+
+                for info in valid_edges:
+                    p1 = info["p1"]
+                    p2 = info["p2"]
+                    edge = info["edge"]
+                    edge_len = info["length"]
+
+                    if edge_len < 1e-6:
+                        continue
+
+                    # Outward normal
+                    # Normal is (-dy, dx)
+                    curr_normal = np.array([-edge[1], edge[0]]) / edge_len
+
+                    # Check direction relative to center
+                    midpoint = (p1 + p2) / 2
+                    if np.dot(curr_normal, midpoint - pipe_center) < 0:
+                        curr_normal = -curr_normal
+
+                    # Perpendicular distance from pts[i] to line
+                    # dist = |dot(pts[i] - p1, curr_normal)|
+                    dist = abs(np.dot(target - p1, curr_normal))
+
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_dir = curr_normal
+
+                best_normal = best_dir
+
+                # Adjust push distance to account for non-optimal direction
+                proj = np.dot(best_normal, normal)
+                if abs(proj) > 1e-3:
+                    separation_distance = separation_distance / abs(proj)
+
+                # === ROTATION TESTS FOR PIPES ===
+                # Test rotated angles for the best normal to find even better escape paths
+                test_angles = [15, -15, 30, -30, 45, -45, 60, -60]
+
+                # Initial best is what we found from edges
+                best_overlaps = count_new_overlaps(
+                    pts[i] + separation_distance * best_normal
+                )
+                direction_preference = 1
+
+                if not best_overlaps == 0:
+                    for angle_deg in test_angles:
+                        angle_rad = np.radians(angle_deg)
+                        # Rotate normal vector by angle (2D rotation)
+                        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+                        rotated_normal = np.array(
+                            [
+                                best_normal[0] * cos_a - best_normal[1] * sin_a,
+                                best_normal[0] * sin_a + best_normal[1] * cos_a,
+                            ]
+                        )
+
+                        # For pipes, we need to be careful with separation distance adjustment
+                        # The original separation was along 'normal' (penetration normal)
+                        # We projected it to 'best_normal' (edge normal)
+                        # Now we rotate 'best_normal' to 'rotated_normal'
+
+                        # Recalculate projection from original penetration normal to rotated normal
+                        proj_rotated = np.dot(rotated_normal, normal)
+
+                        if abs(proj_rotated) > 1e-3:
+                            # Original required separation along 'normal' is (min_separation - sep)
+                            # We need to push along 'rotated_normal' such that the component along 'normal' is at least that much
+                            # dist * dot(rotated_normal, normal) = required_sep
+                            # dist = required_sep / dot(rotated_normal, normal)
+                            # Note: separation_distance currently holds the value adjusted for best_normal
+                            # Let's go back to base required separation
+                            base_sep = min_separation - sep
+                            adjusted_push = base_sep / abs(proj_rotated)
+
+                            pos_rotated = pts[i] + adjusted_push * rotated_normal
+                            overlaps_rotated = count_new_overlaps(pos_rotated)
+
+                            if overlaps_rotated == 0:
+                                best_overlaps = overlaps_rotated
+                                best_normal = rotated_normal
+                                direction_preference = angle_deg
+                                separation_distance = adjusted_push  # Update separation distance for return
+                                break
+
+                return (
+                    i,
+                    j,
+                    separation_distance,
+                    best_normal,
+                    hullA,
+                    hullB,
+                    direction_preference,
+                    True,  # is_pipe
+                    dist_to_target,
+                )
+
+            # === SMART DIRECTION SELECTION ===
+            # Test both push directions and choose the one with fewer new overlaps
+            direction_preference = 1  # Default: use normal direction
+
+            # Calculate test positions for both directions
+            test_push_distance = separation_distance
+            pos_normal = (
+                pts[i] + test_push_distance * normal
+            )  # Push in normal direction
+            pos_reversed = (
+                pts[i] - test_push_distance * normal
+            )  # Push in reversed direction
 
             # Compare overlap counts for both directions
             overlaps_normal = count_new_overlaps(pos_normal)
@@ -412,6 +604,35 @@ def project_to_nonoverlap(
                         if overlaps_rotated == 0:
                             break
 
+                # for reversed normal
+                for angle_deg in test_angles:
+                    angle_rad = np.radians(angle_deg)
+                    # Rotate normal vector by angle (2D rotation)
+                    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+                    rotated_normal = np.array(
+                        [
+                            -normal[0] * cos_a + normal[1] * sin_a,
+                            -normal[0] * sin_a - normal[1] * cos_a,
+                        ]
+                    )
+
+                    # Adjust push distance to maintain minimum separation
+                    # separation = push_distance * cos(angle) >= min_separation
+                    # So push_distance = separation_distance / cos(angle)
+                    adjusted_push = separation_distance / np.cos(angle_rad)
+                    pos_rotated = pts[i] + adjusted_push * rotated_normal
+
+                    overlaps_rotated = count_new_overlaps(pos_rotated)
+
+                    if overlaps_rotated < best_overlaps:
+                        best_overlaps = overlaps_rotated
+                        best_normal = rotated_normal
+                        direction_preference = angle_deg  # Store angle as preference
+
+                        # If we found a zero-overlap direction, use it immediately
+                        if overlaps_rotated == 0:
+                            break
+
             return (
                 i,
                 j,
@@ -420,6 +641,8 @@ def project_to_nonoverlap(
                 hullA,
                 hullB,
                 direction_preference,
+                False,  # is_pipe
+                dist_to_target,
             )
         return None
 
@@ -502,18 +725,12 @@ def project_to_nonoverlap(
         print(f"Active movables count: {len(active_indices)}")
 
         # === OPTIMIZATION 4: Batch resolution of non-conflicting overlaps ===
-        overlaps.sort(key=lambda o: o[0], reverse=True)
-
-        # Track convergence
-        max_penetration = overlaps[0][2]
-        if abs(prev_max_penetration - max_penetration) < tolerance:
-            no_progress_count += 1
-            if no_progress_count >= 25:
-                # Converged - no significant progress
-                break
-        else:
-            no_progress_count = 0
-        prev_max_penetration = max_penetration
+        # Sort by distance to target (ascending) then separation distance (descending)
+        # We want to solve overlaps for objects close to their target first
+        # Tuple comparison: (dist_to_target, -separation_distance)
+        # Default sort is ascending, so this gives smallest dist_to_target first,
+        # and for same dist, largest separation_distance first (most severe overlap)
+        overlaps.sort(key=lambda o: (o[8], -o[2]))
 
         # Resolve multiple non-conflicting overlaps in one iteration
         resolved_indices = set()
@@ -529,6 +746,8 @@ def project_to_nonoverlap(
             hullA,
             hullB,
             direction_preference,
+            is_pipe,
+            dist_to_target,
         ) in overlaps:
             if i in resolved_indices:
                 continue
@@ -563,7 +782,7 @@ def project_to_nonoverlap(
         if len(resolved_indices) == 0:
             # All overlaps conflict with each other, just resolve worst one
             best_overlap = overlaps[0]
-            i, j, separation_distance, normal, _, _, _ = best_overlap
+            i, j, separation_distance, normal, _, _, _, _, _ = best_overlap
 
             if j is None:
                 pts[i] += separation_distance * normal
@@ -576,6 +795,30 @@ def project_to_nonoverlap(
 
         # Update active set
         # Only objects that had overlaps (or were hit by active objects) remain active
+
+        # === NEIGHBOR ACTIVATION ===
+        # Keep objects active if they are nearby other active objects
+        # This prevents premature deactivation of objects in a cluster
+        if next_active_indices:
+            # Convert to list for KD-tree query
+            next_active_list = list(next_active_indices)
+            active_positions = pts[next_active_list]
+
+            # Find all neighbors within radius
+            # Use 2.0 * max_movable_size as interaction radius
+            neighbor_radius = max_movable_size * 2.0
+
+            # Query all active points against the tree of ALL movables
+            # This finds any movable that is close to an active movable
+            indices_list = movable_tree.query_ball_point(
+                active_positions, neighbor_radius
+            )
+
+            # Add all found neighbors to next_active_indices
+            for indices in indices_list:
+                for idx in indices:
+                    next_active_indices.add(idx)
+
         active_indices = next_active_indices
         if not active_indices:
             break
@@ -602,36 +845,39 @@ def optimize(
     Returns:
         Tuple of (best result, initial position vector for best result)
     """
-    min_separation = 0.0
 
     x0 = np.array([movable["target"] for movable in movables]).reshape(-1)
     result = x0.copy()
 
-    # Check initial overlaps with target separation to identify active objects
-    print(f"Checking initial overlaps with min_separation={min_separation}...")
-    initial_overlaps = find_all_overlaps(
-        x0, movables, fixed_obstacles, min_separation=min_separation
-    )
-    print(f"Initial number of overlaps: {len(initial_overlaps)}")
+    # min_separation = 0.0
+    # # Check initial overlaps with target separation to identify active objects
+    # print(f"Checking initial overlaps with min_separation={min_separation}...")
+    # initial_overlaps = find_all_overlaps(
+    #     x0, movables, fixed_obstacles, min_separation=min_separation
+    # )
+    # print(f"Initial number of overlaps: {len(initial_overlaps)}")
 
-    # Identify active movables (those involved in any overlap)
-    active_indices = set()
-    for overlap in initial_overlaps:
-        # Unpack only the first two elements, ignore the rest
-        i = overlap[0]
-        j = overlap[1]
-        active_indices.add(i)
-        if j is not None:
-            active_indices.add(j)
+    # # Identify active movables (those involved in any overlap)
+    # active_indices = set()
+    # for overlap in initial_overlaps:
+    #     # Unpack only the first two elements, ignore the rest
+    #     i = overlap[0]
+    #     j = overlap[1]
+    #     active_indices.add(i)
+    #     if j is not None:
+    #         active_indices.add(j)
 
-    if not active_indices:
-        print("No overlaps found satisfying min_separation. Optimization skipped.")
-        return result, x0
+    # if not active_indices:
+    #     print("No overlaps found satisfying min_separation. Optimization skipped.")
+    #     return result, x0
+
+
+    active_indices = set(range(len(movables)))
 
     print(f"Active movables: {len(active_indices)} / {len(movables)}")
 
     # ==================== STAGE 3: FINAL TIGHTENING ====================
-    min_separation = 0.3
+    min_separation = 0.2
 
     print("\n" + "=" * 80)
     print(f"STAGE 3: Final tightening with min_separation={min_separation}")
@@ -689,7 +935,7 @@ def optimize(
             result,
             movables,
             fixed_obstacles,
-            max_proj_iters=20,
+            max_proj_iters=1,
             min_separation=min_separation,
         )
         result = result_stage3

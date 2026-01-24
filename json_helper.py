@@ -44,6 +44,7 @@ def load_problem_data(json_path):
             movables.append(element)
         elif item.get("IsFixed"):
             element["center"] = origin
+            element["ElementType"] = item["ElementType"]
             fixed_obstacles.append(element)
 
     print(

@@ -46,7 +46,10 @@ def plot_result(
             label="Fixed Obstacles" if idx == 0 else "",
         )
         ax1.add_patch(polygon_patch)
-        ax1.plot(poly_hull[:, 0], poly_hull[:, 1], "darkred", linewidth=0.25)
+        if obs.get("ElementType") == "Pipe":
+            ax1.plot(poly_hull[:, 0], poly_hull[:, 1], "yellow", linewidth=0.25)
+        else:
+            ax1.plot(poly_hull[:, 0], poly_hull[:, 1], "darkred", linewidth=0.25)
 
     # plot movables (initial positions)
     if xvec_initial is not None:
@@ -110,7 +113,10 @@ def plot_result(
             label="Fixed Obstacles" if idx == 0 else "",
         )
         ax2.add_patch(polygon_patch)
-        ax2.plot(poly_hull[:, 0], poly_hull[:, 1], "darkred", linewidth=0.25)
+        if obs.get("ElementType") == "Pipe":
+            ax2.plot(poly_hull[:, 0], poly_hull[:, 1], "yellow", linewidth=0.25)
+        else:
+            ax2.plot(poly_hull[:, 0], poly_hull[:, 1], "darkred", linewidth=0.25)
 
     # plot movables (optimized positions)
     for i, p in enumerate(pts):
