@@ -47,7 +47,7 @@ fixed_per_region, movables_per_region, regions_info = split_into_regions(
 3. Subtract buffered pipes from boundary
 4. Resulting pieces become separate regions
 5. Assign movables to regions based on their center point
-
+![Region Splitting](regions_after.png)
 ### 2. Pull Into Region (`greedy_optimizer.py`)
 
 Ensures all movables are **fully contained** within their assigned region before optimization.
