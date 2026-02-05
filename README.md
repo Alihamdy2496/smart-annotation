@@ -1,73 +1,284 @@
-# Smart Annotation Placement
+# Annotation Placement Optimizer
 
-This project implements a high-performance, automated system for placing text annotations (or any 2D polygonal shapes) in a layout such that they do not overlap with each other or with fixed obstacles, while remaining as close as possible to their target positions.
+A collision-free placement optimization system for BIM/MEP annotation objects. The system resolves overlaps between movable annotation objects while respecting fixed obstacles (pipes, equipment) and region boundaries.
 
-## The Problem
+## Overview
 
-In automated drafting, mapping, and data visualization, placing labels is a classic problem. The goal is to:
-1.  **Avoid Overlaps**: No two movable objects (annotations) can overlap.
-2.  **Avoid Obstacles**: Movable objects cannot overlap with fixed obstacles (e.g., geometry lines, other components).
-3.  **Maintain Proximity**: Each object has a "target" position (its ideal location) and should be moved as little as possible.
+The optimizer uses a **region-based greedy placement** approach that guarantees zero overlaps by construction. The space is divided into regions using pipe networks as natural dividers, then each region is optimized independently.
 
-This is a constrained optimization problem that becomes computationally expensive as the number of objects increases ($O(N^2)$ interactions).
+## Pipeline
 
-## The Solution
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            OPTIMIZATION PIPELINE                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 
-We use an **Iterative Projection Algorithm** combined with **Spatial Indexing** and **Hybrid Acceleration**.
+    ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+    │   STAGE 1    │     │  STAGE 1.5   │     │   STAGE 2    │     │   STAGE 3    │
+    │    Region    │ ──▶ │     Pull     │ ──▶ │    Greedy    │ ──▶ │   Combine    │
+    │   Splitting  │     │    Inside    │     │  Placement   │     │   & Verify   │
+    └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+          │                    │                    │                    │
+          ▼                    ▼                    ▼                    ▼
+    Divide space by      Ensure all movables   Place objects one    Merge results,
+    subtracting pipes    are fully inside      by one, avoiding     verify 0 overlaps
+    from boundary        their assigned region all collisions
+```
 
-### Core Algorithm
-The system uses a physics-inspired relaxation approach:
-1.  **Collision Detection**: We use the **Separating Axis Theorem (SAT)** to detect overlaps between convex polygons.
-2.  **Projection**: When an overlap is detected, we calculate the minimum translation vector (MTV) required to separate the objects.
-3.  **Iterative Solver**: We apply these translation vectors iteratively. In each step, objects are "pushed" away from overlaps. This repeats until convergence (zero overlaps) or a maximum iteration count is reached.
+## Key Components
 
-![Projection Test Result](projection_test_result.png)
+### 1. Region Splitting (`region_simple.py`)
 
-### Performance Optimizations
+Divides the placement space into independent regions using the **pipe subtraction method**:
 
-To handle hundreds of objects efficiently, we implemented several key optimizations:
+```python
+fixed_per_region, movables_per_region, regions_info = split_into_regions(
+    movables, 
+    fixed_obstacles, 
+    placement_bounds,
+    pipe_buffer=0.5,       # Buffer for detecting pipe connections
+    min_region_area=10.0,  # Filter tiny regions
+)
+```
 
-#### 1. Spatial Indexing (KD-Tree)
-Instead of checking every object against every other object ($O(N^2)$), we use a `cKDTree` (from `scipy.spatial`) to find potential collision candidates within a search radius. This reduces the complexity to approximately $O(N \log N)$.
+**How it works:**
+1. Create boundary polygon from placement bounds
+2. Buffer all pipes and merge connected ones
+3. Subtract buffered pipes from boundary
+4. Resulting pieces become separate regions
+5. Assign movables to regions based on their center point
 
-#### 2. Hybrid Numba + Python Architecture
-This is the core of our performance strategy. We use a "Fast Path / Robust Fallback" pattern:
+### 2. Pull Into Region (`greedy_optimizer.py`)
 
-*   **Fast Path (Numba)**:
-    *   We use **Numba** to JIT-compile the collision detection and resolution logic into optimized machine code.
-    *   For the majority of cases (single movable vs. multiple fixed obstacles), the Numba path runs orders of magnitude faster than Python.
-    *   It uses a "Greedy" resolution strategy with random perturbations to escape local minima.
+Ensures all movables are **fully contained** within their assigned region before optimization.
 
-*   **Robust Fallback (Python)**:
-    *   In complex scenarios (e.g., an object trapped between multiple obstacles), the greedy Numba solver might fail to resolve all overlaps within the iteration limit.
-    *   The system detects this failure and automatically **falls back** to a robust, pure Python implementation for that specific batch.
-    *   This ensures **100% reliability** (zero overlaps) without sacrificing the speed benefits of Numba for the 95% of "easy" cases.
+**Problem:** A movable's center may be in Region A, but its polygon extends into Region B.
 
-### Staged Processing
-The optimization runs in three stages to balance speed and quality:
-1.  **Stage 1 (Global Projection)**: Moves objects to approximate non-overlapping positions.
-2.  **Stage 2 (Batch Refinement)**: Processes objects in batches using the **Hybrid Numba/Python** engine with tighter constraints.
-3.  **Stage 3 (Final Tightening)**: A final pass to ensure strict adherence to the minimum separation distance.
+**Solution:** Find the minimum displacement to pull the entire polygon inside:
 
-## Project Structure
+```python
+# Find the part of the polygon that's INSIDE the region
+inside_part = mov_poly.intersection(region_poly)
 
-*   `main.py`: Entry point. Loads data, runs optimization, and saves results.
-*   `optimizer.py`: Core optimization logic, including the hybrid Numba/Python solver.
-*   `numba_utils.py`: JIT-compiled functions for high-speed collision detection.
-*   `polygon_utils.py`: Robust Python geometry functions (SAT, convex hulls).
-*   `json_helper.py`: Handles JSON I/O and data conversion.
-*   `plotting.py`: Visualization utilities.
+# Direction: from target toward inside part centroid
+direction = inside_centroid - target
+
+# Move along direction until entire polygon fits
+for dist in np.arange(0.1, 50, 0.1):
+    test_pos = target + direction * dist
+    if inner_region.contains(get_movable_polygon(mov, test_pos)):
+        mov["target"] = test_pos
+        break
+```
+
+### 3. Greedy Placement (`greedy_optimizer.py`)
+
+Places objects one-by-one, guaranteeing zero overlaps by construction.
+
+**Key insight:** Objects already at valid positions should stay there.
+
+```python
+# PHASE 1: Identify objects already at valid positions
+for mov in movables:
+    if is_inside_region(mov) and not overlaps_fixed_obstacles(mov):
+        valid_at_target.append(mov)
+    else:
+        need_placement.append(mov)
+
+# PHASE 2: Place valid objects first (largest first for priority)
+for mov in sorted(valid_at_target, by_size, largest_first):
+    if not overlaps_already_placed(mov):
+        place_at_target(mov)  # No movement needed!
+    else:
+        need_placement.append(mov)
+
+# PHASE 3: Place remaining objects using spiral search
+for mov in sorted(need_placement, by_size, largest_first):
+    new_pos = find_nearest_valid_position(mov)
+    place_at(mov, new_pos)
+```
+
+### 4. Position Search
+
+When an object needs to move, find the nearest valid position using **spiral search**:
+
+```python
+def spiral_search(center, max_radius, step=0.5, region_poly=None):
+    """Search outward from center in spiral pattern."""
+    yield center  # Try original position first
+    
+    for radius in np.arange(step, max_radius, step):
+        n_points = max(8, int(2 * π * radius / step))
+        for i in range(n_points):
+            angle = 2 * π * i / n_points
+            pos = center + radius * [cos(angle), sin(angle)]
+            
+            # Only yield positions inside region
+            if region_poly is None or region_poly.contains(Point(pos)):
+                yield pos
+```
+
+### 5. Collision Detection
+
+Uses **Shapely** for robust polygon operations:
+
+```python
+def check_position_valid(mov, position, obstacle_union, placed_polys, region_poly):
+    mov_poly = get_movable_polygon(mov, position)
+    
+    # Must be inside region
+    if not region_poly.contains(mov_poly):
+        return False
+    
+    # Must not overlap fixed obstacles
+    if mov_poly.buffer(min_separation/2).intersects(obstacle_union):
+        return False
+    
+    # Must not overlap already-placed movables
+    for placed in placed_polys:
+        if mov_poly.buffer(min_separation/2).intersects(placed):
+            return False
+    
+    return True
+```
+
+## Geometry Handling
+
+### Movable Structure
+
+```python
+movable = {
+    "ElementId": "12345",           # Unique identifier
+    "target": np.array([x, y]),     # Position (local origin placement)
+    "verts": [[-2,-2], [2,-2], ...], # Vertices in local coordinates
+    "RotationAngle": 0.0,           # Rotation in radians
+}
+```
+
+### Coordinate System
+
+- `target` is where the **local origin (0,0)** is placed in world coordinates
+- `verts` are in **local coordinates** relative to origin
+- The **geometric center** may differ from `target` if vertices aren't centered at origin
+
+```python
+# Get actual geometric center in world coordinates
+local_center = np.array(mov["verts"]).mean(axis=0)
+world_center = target + rotate(local_center, rotation_angle)
+```
+
+### Polygon Creation
+
+```python
+def get_movable_polygon(mov, position):
+    """Create Shapely polygon for movable at given position."""
+    # Transform vertices to world coordinates
+    verts = translate_polygon(mov["verts"], position, mov["RotationAngle"])
+    hull = get_convex_hull_vertices(verts)
+    return ShapelyPolygon(hull)
+```
+
+## Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `min_separation` | 0.1 | Minimum gap between objects |
+| `search_step` | 0.3 | Step size for spiral search |
+| `max_search_radius` | 50.0 | Maximum search distance from target |
+| `pipe_buffer` | 0.5 | Buffer for detecting pipe connections |
+| `min_region_area` | 10.0 | Filter regions smaller than this |
+| `min_margin` | 0.1 | Margin from region boundary |
+
+## Output
+
+```python
+# Final positions as flat array [x0, y0, x1, y1, ...]
+combined_result = np.array([...])
+
+# Metrics
+displacement = np.linalg.norm(final - original, axis=1)
+avg_displacement = displacement.mean()
+max_displacement = displacement.max()
+
+# Overlap verification (should be 0)
+overlaps = find_all_overlaps(result, movables, fixed_obstacles)
+```
+
+## Visualization
+
+The system generates several visualization files:
+
+| File | Description |
+|------|-------------|
+| `regions_before.png` | Two-panel view showing regions and movables before optimization |
+| `regions_after.png` | Two-panel view after optimization |
+| `before.png` | Standard view with original positions |
+| `after.png` | Standard view with optimized positions |
+| `output.json` | Final positions in JSON format |
+
+## Algorithm Guarantees
+
+1. **Zero overlaps** - By construction, each object is only placed if it doesn't overlap anything already placed
+
+2. **Region containment** - All movables stay within their assigned region boundaries
+
+3. **Minimum displacement** - Objects at valid positions stay in place; others move the minimum distance needed
+
+4. **Fixed obstacle avoidance** - No movable overlaps pipes or other fixed obstacles
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `main.py` | Main execution script |
+| `greedy_optimizer.py` | Greedy placement algorithm |
+| `region_simple.py` | Region splitting using pipe subtraction |
+| `polygon_utils.py` | Geometry utilities (SAT, convex hull, etc.) |
+| `json_helper.py` | JSON loading/saving |
+| `plotting.py` | Visualization functions |
 
 ## Usage
 
-Run the main script:
+```python
+from main import main
 
-```bash
-python3 main.py
+# Run optimization
+main()
+
+# Or use components directly:
+from region_simple import split_into_regions
+from greedy_optimizer import greedy_optimize_with_regions, pull_movables_into_region
+
+# Split into regions
+fixed_per_region, movables_per_region, regions_info = split_into_regions(
+    movables, fixed_obstacles, placement_bounds
+)
+
+# Pull movables inside their regions
+for movs, region_info in zip(movables_per_region, regions_info):
+    pull_movables_into_region(movs, region_info["shapely_polygon"])
+
+# Run optimization
+results, x0s, indices = greedy_optimize_with_regions(
+    movables_per_region, fixed_per_region, regions_info
+)
 ```
 
-This will:
-1.  Load problem data from `AnnotationCleaner_CurveLoops.json`.
-2.  Run the optimization.
-3.  Save the result to `output.json`.
-4.  Generate visualization images: `before.png` and `after.png`.
+## Performance
+
+- **Region splitting:** O(n) where n = number of pipes
+- **Greedy placement:** O(m² × s) where m = movables per region, s = search positions
+- **Typical runtime:** 1-5 seconds for ~100 movables
+
+## Limitations
+
+1. Greedy approach may not find globally optimal solution
+2. Very crowded regions may require large displacements
+3. Non-convex movables are approximated by convex hull
+
+## Future Improvements
+
+- [ ] Parallel region optimization
+- [ ] Simulated annealing for local refinement
+- [ ] Support for non-convex polygons
+- [ ] Weighted displacement (prefer certain objects to stay in place)
