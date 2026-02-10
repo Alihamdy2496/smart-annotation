@@ -371,11 +371,12 @@ def main():
         # pipe_buffer controls how much pipes are expanded to detect connections
         # min_region_area filters out tiny regions
         fixed_per_region, movables_per_region, regions_info = split_into_regions(
-            movables, 
-            fixed_obstacles, 
+            movables,
+            fixed_obstacles,
             placement_bounds,
-            pipe_buffer=0.5,
+            pipe_buffer=0.5,  # Large buffer for clean region separation
             min_region_area=10.0,  # Filter regions smaller than this
+            min_separation=0.001,  # Objects can get this close to pipes
         )
         
         # If only 1 region created, fall back to single-region mode
@@ -468,7 +469,7 @@ def main():
         movables_per_region,
         fixed_per_region,
         regions_info,
-        min_separation=0.01,
+        min_separation=0.1,
         search_step=0.3,
         max_search_radius=50.0,
     )

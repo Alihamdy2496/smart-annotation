@@ -607,7 +607,7 @@ def greedy_optimize_region(
     placement_bounds=None,
     search_step=0.5,
     max_search_radius=50.0,
-    priority_mode="distance",  # "distance", "size", "original_order"
+    priority_mode="size",  # "distance", "size", "original_order"
 ):
     """
     Optimize a region using greedy placement.
@@ -692,34 +692,84 @@ def greedy_optimize_region(
     
     print(f"    {len(valid_at_target)} objects at valid positions, {len(need_placement)} need placement")
     
-    # PHASE 2: Check for movable-movable overlaps among valid_at_target
-    # If two objects overlap at their targets, one needs to move
-    final_valid = []
-    still_need_placement = list(need_placement)  # Copy
-    
+    # PHASE 2: Prioritize movable-fixed conflicts, then movable-movable conflicts
     placed_polys = []  # Polygons of already-placed movables
     result = np.zeros(len(movables) * 2)
-    
-    # Sort valid_at_target by size (largest first get priority to stay)
+
+    # Helper function to get object size
     def get_size(idx_mov):
         mov = idx_mov[1]
         verts = np.array(mov["verts"])
         return (verts[:, 0].max() - verts[:, 0].min()) * (verts[:, 1].max() - verts[:, 1].min())
-    
+
+    # Step 2a: Place movable-fixed conflicts from need_placement
+    movable_fixed_conflicts = []
+    movable_other = []
+
+    for idx, mov in need_placement:
+        target = np.array(mov["target"])
+        mov_poly = get_movable_polygon(mov, target)
+
+        if mov_poly is None:
+            movable_other.append((idx, mov))
+            continue
+
+        # Check if overlaps with fixed obstacles
+        mov_poly_buffered = mov_poly.buffer(min_separation / 2)
+        overlaps_fixed = not obstacle_union.is_empty and mov_poly_buffered.intersects(obstacle_union)
+
+        if overlaps_fixed:
+            movable_fixed_conflicts.append((idx, mov))
+        else:
+            movable_other.append((idx, mov))
+
+    # Sort movable-fixed conflicts by size (largest first)
+    movable_fixed_conflicts.sort(key=get_size, reverse=True)
+
+    print(f"    {len(movable_fixed_conflicts)} movable-fixed conflicts to place first")
+
+    # Place movable-fixed conflicts
+    still_failed = []
+    for idx, mov in movable_fixed_conflicts:
+        target = np.array(mov["target"])
+
+        new_pos = find_nearest_valid_position(
+            mov, target, obstacle_union, placed_polys,
+            region_poly, bounds, min_separation,
+            max_search_radius, search_step
+        )
+
+        if new_pos is None:
+            # Could not place - will try again in Phase 3
+            still_failed.append((idx, mov))
+        else:
+            # Successfully placed
+            result[idx * 2] = new_pos[0]
+            result[idx * 2 + 1] = new_pos[1]
+
+            placed_poly = get_movable_polygon(mov, new_pos)
+            if placed_poly is not None:
+                placed_polys.append(placed_poly.buffer(min_separation / 2))
+
+    # Step 2b: Resolve movable-movable conflicts from valid_at_target
+    # Sort valid_at_target by size (largest first get priority to stay)
     valid_at_target.sort(key=get_size, reverse=True)
-    
+
+    final_valid = []
+    still_need_placement = list(movable_other)  # Objects without fixed conflicts
+
     for idx, mov in valid_at_target:
         target = np.array(mov["target"])
         mov_poly = get_movable_polygon(mov, target)
         mov_poly_buffered = mov_poly.buffer(min_separation / 2)
-        
-        # Check if it overlaps any already-placed movable
+
+        # Check if it overlaps any already-placed movable (from step 2a)
         overlaps_placed = False
         for placed_poly in placed_polys:
             if mov_poly_buffered.intersects(placed_poly):
                 overlaps_placed = True
                 break
-        
+
         if not overlaps_placed:
             # Can stay at target
             result[idx * 2] = target[0]
@@ -727,9 +777,12 @@ def greedy_optimize_region(
             placed_polys.append(mov_poly.buffer(min_separation / 2))
             final_valid.append((idx, mov))
         else:
-            # Overlaps another movable, needs placement
+            # Overlaps - needs placement
             still_need_placement.append((idx, mov))
-    
+
+    # Add failed movable-fixed conflicts back to still_need_placement
+    still_need_placement.extend(still_failed)
+
     print(f"    {len(final_valid)} staying at target, {len(still_need_placement)} being repositioned")
     
     # PHASE 3: Place remaining objects using greedy search

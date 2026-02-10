@@ -27,22 +27,21 @@ def load_problem_data(json_path):
         origin = np.array([item["Origin"]["X"], item["Origin"]["Y"]])
         origin_z = item["Origin"]["Z"]
         verts_absolute = np.array([[v["X"], v["Y"]] for v in item["Vertices"]])
-        verts_z = [v["Z"] for v in item["Vertices"]]
+        # verts_z = [v["Z"] for v in item["Vertices"]]
         verts_local = verts_absolute - origin
 
         element = {
             "verts": verts_local,
             "ElementId": item["ElementId"],
-            "HostElementId": item["HostElementId"],
             "RotationAngle": item["RotationAngle"],
         }
 
         if item.get("IsMovable"):
             element["target"] = origin
             element["origin_z"] = origin_z
-            element["verts_z"] = verts_z
+            # element["verts_z"] = verts_z
             movables.append(element)
-        elif item.get("IsFixed"):
+        else:
             element["center"] = origin
             element["ElementType"] = item["ElementType"]
             fixed_obstacles.append(element)
@@ -98,9 +97,7 @@ def save_optimized_output(xvec, movables, output_path="output.json"):
         # Create output element
         element = {
             "ElementId": movable["ElementId"],
-            "HostElementId": movable["HostElementId"],
             "IsMovable": True,
-            "IsFixed": False,
             "RotationAngle": movable["RotationAngle"],
             "Origin": {
                 "X": float(p[0]),
@@ -108,7 +105,7 @@ def save_optimized_output(xvec, movables, output_path="output.json"):
                 "Z": float(movable["origin_z"]),
             },
             "Vertices": [
-                {"X": float(v[0]), "Y": float(v[1]), "Z": float(movable["verts_z"][j])}
+                {"X": float(v[0]), "Y": float(v[1])}
                 for j, v in enumerate(verts_absolute)
             ],
         }

@@ -58,18 +58,20 @@ def get_pipe_polygons(fixed_obstacles, buffer_margin=0.5):
     return pipe_polygons
 
 
-def split_into_regions(movables, fixed_obstacles, placement_bounds, 
-                       pipe_buffer=0.5, min_region_area=1.0):
+def split_into_regions(movables, fixed_obstacles, placement_bounds,
+                       pipe_buffer=0.5, min_region_area=1.0, min_separation=0.3):
     """
     Split the placement area into regions using pipes as natural barriers.
-    
+
     Args:
         movables: List of movable object dictionaries
-        fixed_obstacles: List of fixed obstacle dictionaries  
+        fixed_obstacles: List of fixed obstacle dictionaries
         placement_bounds: Tuple of ((xmin, xmax), (ymin, ymax))
-        pipe_buffer: Buffer around pipes for connection detection (default: 0.5)
+        pipe_buffer: Buffer around pipes for region splitting (default: 0.5)
         min_region_area: Minimum area for a region to be kept (default: 1.0)
-        
+        min_separation: Minimum separation for objects from obstacles (default: 0.3)
+                       Used to expand regions back toward pipes after splitting
+
     Returns:
         tuple: (
             fixed_obstacles_per_region,  # List of lists - fixed obstacles per region
@@ -101,7 +103,7 @@ def split_into_regions(movables, fixed_obstacles, placement_bounds,
     
     # 4. Subtract pipes from boundary to get free regions
     free_space = boundary_poly.difference(pipes_union)
-    
+
     # 5. Extract individual regions
     if free_space.is_empty:
         print("  Warning: No free space after subtracting pipes!")
@@ -110,9 +112,30 @@ def split_into_regions(movables, fixed_obstacles, placement_bounds,
         regions_polys = list(free_space.geoms)
     else:
         regions_polys = [free_space]
-    
-    # Filter out tiny regions
+
+    # Filter out tiny regions before expansion
     regions_polys = [r for r in regions_polys if r.area >= min_region_area]
+
+    # Keep original regions for movable assignment
+    original_regions = regions_polys.copy()
+
+    # 6. Expand regions back toward pipes to allow closer placement
+    # Three separate buffer uses:
+    #   1. pipe_buffer: for splitting regions (creates clean separation)
+    #   2. min_separation/2: for placing movables around obstacles
+    #   3. Original regions (no expansion): for assigning movables to regions
+    expansion_amount = pipe_buffer - (min_separation / 2)
+    if expansion_amount > 0:
+        print(f"  Expanding regions by {expansion_amount:.2f} to allow closer placement to pipes")
+        expanded_regions = []
+        for poly in regions_polys:
+            # Buffer outward to expand toward pipes
+            expanded = poly.buffer(expansion_amount, join_style=2)  # mitre join
+            # Clip to original boundary
+            expanded = expanded.intersection(boundary_poly)
+            if not expanded.is_empty:
+                expanded_regions.append(expanded)
+        regions_polys = expanded_regions
     
     print(f"  Created {len(regions_polys)} regions from pipe barriers")
     
@@ -133,25 +156,25 @@ def split_into_regions(movables, fixed_obstacles, placement_bounds,
         except:
             continue
     
-    # 7. Prepare regions for fast containment checks
-    prepared_regions = [prep(poly) for poly in regions_polys]
-    
-    # 8. Assign movables to regions
-    movables_per_region = [[] for _ in range(len(regions_polys))]
-    
+    # 7. Prepare original regions for movable assignment (no expansion buffer)
+    prepared_original_regions = [prep(poly) for poly in original_regions]
+
+    # 8. Assign movables to regions using ORIGINAL (unexpanded) boundaries
+    movables_per_region = [[] for _ in range(len(prepared_original_regions))]
+
     for mov in movables:
         center_pt = Point(mov["target"])
         assigned = False
-        
-        for i, prep_poly in enumerate(prepared_regions):
+
+        for i, prep_poly in enumerate(prepared_original_regions):
             if prep_poly.contains(center_pt):
                 movables_per_region[i].append(mov)
                 assigned = True
                 break
-        
+
         if not assigned:
-            # Find closest region
-            dists = [poly.distance(center_pt) for poly in regions_polys]
+            # Find closest region (using original regions)
+            dists = [poly.distance(center_pt) for poly in original_regions]
             closest_idx = np.argmin(dists)
             movables_per_region[closest_idx].append(mov)
     
@@ -166,11 +189,14 @@ def split_into_regions(movables, fixed_obstacles, placement_bounds,
                     fixed_per_region[i].append(obs)
     
     # 10. Assign pipes to regions they border
-    # Use original (non-buffered) pipe polygons for this
+    # Use original (non-buffered) pipe polygons with min_separation tolerance
+    # This accounts for the expanded region boundaries
     for pipe_obs, pipe_poly_orig, pipe_poly_buffered in pipe_data:
         for i, region_poly in enumerate(regions_polys):
-            # Check if pipe touches or is very close to region boundary
-            if region_poly.distance(pipe_poly_orig) < pipe_buffer * 2:
+            # Check if pipe is within min_separation distance of region
+            # (Region was expanded by pipe_buffer - min_separation/2, so pipes
+            #  should be within min_separation distance of region boundary)
+            if region_poly.distance(pipe_poly_orig) < min_separation:
                 fixed_per_region[i].append(pipe_obs)
     
     # 11. Build regions_info
