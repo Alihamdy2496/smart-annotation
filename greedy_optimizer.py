@@ -223,8 +223,7 @@ def spiral_search(center, max_radius, step=0.5, region_poly=None):
     # Spiral outward
     for radius in np.arange(step, max_radius, step):
         # Number of points at this radius (roughly even spacing)
-        n_points = max(8, int(2 * np.pi * radius / step))
-        
+        n_points = max(50, int(2 * np.pi * radius / step))
         for i in range(n_points):
             angle = 2 * np.pi * i / n_points
             px = x + radius * np.cos(angle)
@@ -532,11 +531,11 @@ def pull_movables_into_region(movables, region_poly, min_margin=0.1):
 
         # Get centroid of the outside part
         outside_centroid = outside_part.centroid
-        print(f"    Outside centroid: {outside_centroid}")
-        print(f"    direction: {direction}")
-        print(f"    Difference x: {direction.x - outside_centroid.x}")
-        print(f"    Difference y: {direction.y - outside_centroid.y}")
-        print(f"    Movable ElementId: {mov['ElementId']}")
+        # print(f"    Outside centroid: {outside_centroid}")
+        # print(f"    direction: {direction}")
+        # print(f"    Difference x: {direction.x - outside_centroid.x}")
+        # print(f"    Difference y: {direction.y - outside_centroid.y}")
+        # print(f"    Movable ElementId: {mov['ElementId']}")
         
         # Direction: from outside centroid toward movable centroid (i.e., pull the outside part in)
         direction = np.array([direction.x - outside_centroid.x,

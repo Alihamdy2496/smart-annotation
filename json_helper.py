@@ -26,7 +26,7 @@ def load_problem_data(json_path):
     for item in data:
         origin = np.array([item["Origin"]["X"], item["Origin"]["Y"]])
         origin_z = item["Origin"]["Z"]
-        verts_absolute = np.array([[v["X"], v["Y"]] for v in item["Vertices"]])
+        verts_absolute = np.array([[v["x"], v["y"]] for v in item["Vertices"]])
         # verts_z = [v["Z"] for v in item["Vertices"]]
         verts_local = verts_absolute - origin
 
@@ -34,6 +34,10 @@ def load_problem_data(json_path):
             "verts": verts_local,
             "ElementId": item["ElementId"],
             "RotationAngle": item["RotationAngle"],
+            "ElementType": item["ElementType"],
+            "CategoryName": item["CategoryName"],
+            "BuiltInCategory": item["BuiltInCategory"],
+            "SegmentIndex": item["SegmentIndex"]
         }
 
         if item.get("IsMovable"):
@@ -46,15 +50,11 @@ def load_problem_data(json_path):
             element["ElementType"] = item["ElementType"]
             fixed_obstacles.append(element)
 
-    print(
-        f"Loaded {len(movables)} movable objects and {len(fixed_obstacles)} fixed obstacles."
-    )
-
     # Compute placement bounds from the data
     all_coords = []
     for item in data:
         for v in item["Vertices"]:
-            all_coords.append([v["X"], v["Y"]])
+            all_coords.append([v["x"], v["y"]])
 
     all_coords = np.array(all_coords)
     x_min, y_min = all_coords.min(axis=0)
@@ -105,9 +105,13 @@ def save_optimized_output(xvec, movables, output_path="output.json"):
                 "Z": float(movable["origin_z"]),
             },
             "Vertices": [
-                {"X": float(v[0]), "Y": float(v[1])}
+                {"x": float(v[0]), "y": float(v[1])}
                 for j, v in enumerate(verts_absolute)
             ],
+            "ElementType": movable["ElementType"],
+            "CategoryName": movable["CategoryName"],
+            "BuiltInCategory": movable["BuiltInCategory"],
+            "SegmentIndex": movable["SegmentIndex"]
         }
 
         output_data.append(element)

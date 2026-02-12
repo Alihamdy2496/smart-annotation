@@ -259,20 +259,21 @@ def combine_region_results(all_results, all_x0s, movables_per_region, original_m
     n_total = len(original_movables)
     combined_result = np.zeros(n_total * 2)
     combined_x0 = np.zeros(n_total * 2)
-    
-    element_to_idx = {m["ElementId"]: i for i, m in enumerate(original_movables)}
-    
+
+    # Use (ElementId, SegmentIndex) as composite key to handle elements with same ElementId
+    element_to_idx = {(m["ElementId"], m["SegmentIndex"]): i for i, m in enumerate(original_movables)}
+
     for region_idx, (result, x0, movables) in enumerate(zip(all_results, all_x0s, movables_per_region)):
         if len(movables) == 0:
             continue
-            
+
         for local_idx, mov in enumerate(movables):
-            original_idx = element_to_idx[mov["ElementId"]]
+            original_idx = element_to_idx[(mov["ElementId"], mov["SegmentIndex"])]
             combined_result[original_idx * 2] = result[local_idx * 2]
             combined_result[original_idx * 2 + 1] = result[local_idx * 2 + 1]
             combined_x0[original_idx * 2] = x0[local_idx * 2]
             combined_x0[original_idx * 2 + 1] = x0[local_idx * 2 + 1]
-    
+
     return combined_result, combined_x0
 
 
@@ -469,7 +470,7 @@ def main():
         movables_per_region,
         fixed_per_region,
         regions_info,
-        min_separation=0.1,
+        min_separation=0.01,
         search_step=0.3,
         max_search_radius=50.0,
     )
@@ -490,10 +491,11 @@ def main():
     )
     
     # Update movables with results
-    element_to_idx = {m["ElementId"]: i for i, m in enumerate(movables)}
+    # Use (ElementId, SegmentIndex) as composite key to handle elements with same ElementId
+    element_to_idx = {(m["ElementId"], m["SegmentIndex"]): i for i, m in enumerate(movables)}
     for region_movables, result in zip(movables_per_region, all_results):
         for local_idx, mov in enumerate(region_movables):
-            original_idx = element_to_idx[mov["ElementId"]]
+            original_idx = element_to_idx[(mov["ElementId"], mov["SegmentIndex"])]
             movables[original_idx]["target"] = result[local_idx * 2 : local_idx * 2 + 2].copy()
             combined_result[original_idx * 2] = result[local_idx * 2]
             combined_result[original_idx * 2 + 1] = result[local_idx * 2 + 1]
@@ -527,7 +529,7 @@ def main():
             continue
         region_result = []
         for mov in movs:
-            orig_idx = element_to_idx[mov["ElementId"]]
+            orig_idx = element_to_idx[(mov["ElementId"], mov["SegmentIndex"])]
             region_result.extend(combined_result[orig_idx * 2 : orig_idx * 2 + 2])
         region_result = np.array(region_result)
         overlaps = find_all_overlaps(region_result, movs, fixed, min_separation=0.0)
@@ -576,7 +578,7 @@ def main():
     combined_original = np.zeros(len(movables) * 2)
     for region_idx, (region_movables, region_positions) in enumerate(zip(movables_per_region, original_positions)):
         for local_idx, (mov, pos) in enumerate(zip(region_movables, region_positions)):
-            original_idx = element_to_idx[mov["ElementId"]]
+            original_idx = element_to_idx[(mov["ElementId"], mov["SegmentIndex"])]
             combined_original[original_idx * 2] = pos[0]
             combined_original[original_idx * 2 + 1] = pos[1]
     
